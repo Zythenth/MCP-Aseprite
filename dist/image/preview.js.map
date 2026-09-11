@@ -1,0 +1,1 @@
+{"version":3,"file":"preview.js","sourceRoot":"","sources":["../../src/image/preview.ts"],"names":[],"mappings":"AAAA,uBAAuB;AACvB,OAAO,EAAE,wBAAwB,IAAI,eAAe,EAA2B,MAAM,YAAY,CAAC;AAWlG;;;;GAIG;AACH,MAAM,UAAU,wBAAwB,CACtC,OAAmB,EACnB,WAAmB,EACnB,YAAoB,EACpB,UAAmC,EAAE;IAErC,OAAO,eAAe,CAAC,OAAO,EAAE,WAAW,EAAE,YAAY,EAAE,OAAkC,CAAC,CAAC;AACjG,CAAC"}

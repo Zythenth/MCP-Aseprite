@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "aseprite": {
+      "command": "node",
+      "args": [
+        "C:/Users/<seu-usuario>/OneDrive/Documentos/mcp/dist/index.js"
+      ],
+      "env": {
+        "ASEPRITE_MCP_PORT": "32123"
+      }
+    }
+  }
+}
