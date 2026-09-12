@@ -1,8 +1,11 @@
 # Aseprite MCP Server
 
-Servidor Model Context Protocol (MCP) em TypeScript que conecta clientes compatíveis, como o Google Gemini, a um documento aberto no Aseprite.
+Servidor Model Context Protocol (MCP) de código aberto em TypeScript que conecta clientes de IA (como Google Gemini, Claude Desktop e outros clientes compatíveis com MCP) ao editor de pixel art Aseprite.
 
-O projeto permite inspecionar sprites, ler pixels, editar imagens, controlar camadas e frames e validar cada alteração por meio de previews PNG. A comunicação com o Aseprite ocorre por um bridge Lua local, sem automação de mouse e sem salvar arquivos automaticamente.
+> [!NOTE]
+> **Projeto Comunitário Não Oficial:** Este projeto é desenvolvido de forma independente pela comunidade e **não é afiliado, patrocinado ou endossado** pelos criadores do Aseprite (David Capello / Igara Studio S.A.).
+
+O servidor permite inspecionar sprites, ler pixels, editar imagens, controlar camadas, frames e animações, validando cada alteração por meio de previews PNG gerados pelo motor do Aseprite. A comunicação com o Aseprite ocorre via WebSocket loopback local por meio de um script bridge em Lua, sem emulação de cliques de mouse e com políticas estritas de proteção de arquivos.
 
 Fluxo principal:
 
@@ -10,55 +13,61 @@ Fluxo principal:
 Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 ```
 
+---
+
 ## Recursos principais
 
-- Inspeção visual com PNG, escala nearest-neighbor, grade e réguas de coordenadas.
-- Leitura exata de pixels em formatos hexadecimal, RGBA, indexado e compacto.
-- Pintura em lote com uma única etapa de Undo por operação.
-- Ferramentas para formas, paletas, camadas, frames, tags e arquivos.
-- Controle de revisão para acompanhar alterações no sprite.
-- Mock Bridge em memória para testes sem abrir o Aseprite.
-- Transporte MCP por `stdio`, com logs isolados em `stderr`.
-- WebSocket restrito ao loopback local `127.0.0.1:32123`.
+- **Inspeção visual rica**: previews em PNG com escala nearest-neighbor, réguas de coordenadas e grades customizáveis.
+- **Leitura precisa de pixels**: formatos hexadecimal (`#RRGGBBAA`), RGBA, indexado e compacto otimizado para economia de tokens.
+- **Edição em lote e Undo atômico**: operações em lote agrupadas em uma única entrada de histórico de Undo.
+- **Ferramentas completas**: formas geométricas, preenchimento por inundação, substituição de cores, paletas, camadas, frames e tags.
+- **Segurança de arquivos**: contenção estrita de caminhos (`ASEPRITE_ALLOWED_PATHS`), política no-clobber por padrão (`overwrite: true` explícito) e validação de arquivo esperado no salvamento.
+- **Autenticação opcional por token**: proteção contra conexões locais não autorizadas no bridge WebSocket (`ASEPRITE_BRIDGE_TOKEN`).
+- **Mock Bridge em memória**: possibilita testes de integração rápidos e headless sem necessidade de abrir a interface do Aseprite.
+- **Transporte padrão stdio**: mensagens de protocolo MCP isoladas em `stdout` e registros de diagnóstico em `stderr`.
+
+---
 
 ## Arquitetura
 
 ```text
-Cliente MCP
+Cliente MCP (Gemini / Claude / outros)
     |
-    | MCP por stdio
+    | MCP sobre stdio
     v
 Aseprite MCP Server (Node.js/TypeScript)
     |
-    | WebSocket JSON-RPC em 127.0.0.1:32123
+    | WebSocket JSON-RPC em 127.0.0.1:32123 (com auth opcional)
     v
-Bridge Lua
+Bridge Lua (aseprite-bridge.lua)
     |
     v
-Documento aberto no Aseprite
+Documento ativo no Aseprite
 ```
 
-O servidor registra as ferramentas MCP, processa imagens e encaminha comandos ao bridge. O bridge executa as operações no documento ativo usando a API Lua do Aseprite e agrupa edições em transações atômicas.
+O servidor registra as ferramentas MCP, valida parâmetros de entrada e encaminha comandos em envelopes correlacionados por ID ao bridge Lua. O script executa comandos na API oficial do Aseprite e retorna resultados estruturados.
+
+---
 
 ## Requisitos
 
-- Node.js 18 ou superior.
-- npm.
-- Aseprite com suporte a WebSocket na API Lua.
-- PowerShell para usar os scripts auxiliares no Windows.
+- **Node.js**: versão 18.0.0 ou superior.
+- **npm**: gerenciador de pacotes incluso no Node.js.
+- **Aseprite**: versão v1.2.30+ ou v1.3+ com suporte à API WebSocket em Lua.
+- **PowerShell**: para execução dos scripts de conveniência no Windows.
 
-Os comandos npm funcionam em Windows, macOS e Linux. A instalação automática do bridge fornecida neste repositório é específica para Windows.
+---
 
 ## Instalação rápida
 
-Clone o repositório e entre na pasta do projeto:
+Clone o repositório e navegue até a pasta:
 
 ```bash
 git clone https://github.com/Zythenth/MCP-Aseprite.git
 cd MCP-Aseprite
 ```
 
-### Windows
+### Windows (Automático)
 
 No PowerShell:
 
@@ -67,39 +76,81 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
 ```
 
-O script:
+O script `install.ps1`:
+1. Verifica Node.js >= 18 e npm;
+2. Instala as dependências via `npm ci --ignore-scripts --no-audit --no-fund`;
+3. Compila o projeto TypeScript gerando `dist/`;
+4. Executa a suíte de testes (a menos que `-SkipTests` seja informado);
+5. Copia `lua/aseprite-bridge.lua` para `%APPDATA%\Aseprite\scripts` caso o Aseprite seja detectado (ou se `-InstallLuaToAseprite` for fornecido).
 
-1. verifica Node.js e npm;
-2. instala as dependências;
-3. compila o TypeScript;
-4. executa os testes, exceto quando usado com `-SkipTests`;
-5. copia `lua/aseprite-bridge.lua` para a pasta de scripts quando encontra uma instalação do Aseprite no perfil do usuário.
-
-### Instalação manual
+### Instalação manual (Todas as plataformas)
 
 ```bash
-npm install
+npm ci --ignore-scripts --no-audit --no-fund
 npm run build
 npm test
 ```
 
-O arquivo de entrada compilado será criado em `dist/index.js`.
+O ponto de entrada compilado será gerado em `dist/index.js`.
 
-## Instalação do bridge no Aseprite
+---
 
-Se o instalador não copiar o bridge automaticamente:
+## Instalação do Bridge no Aseprite
 
-1. abra o Aseprite;
-2. acesse **File > Scripts > Open Scripts Folder**;
-3. copie `lua/aseprite-bridge.lua` para a pasta aberta;
-4. acesse **File > Scripts > Rescan Scripts Folder**;
-5. execute **File > Scripts > aseprite-bridge**.
+Caso o script não tenha sido copiado automaticamente pelo instalador:
 
-O diálogo do bridge mostra o estado da conexão. Ele tenta se conectar ao servidor em `127.0.0.1:32123` e reconecta automaticamente quando o servidor fica disponível.
+1. Abra o Aseprite;
+2. Acesse o menu **File > Scripts > Open Scripts Folder**;
+3. Copie o arquivo `lua/aseprite-bridge.lua` para dentro da pasta aberta;
+4. No Aseprite, clique em **File > Scripts > Rescan Scripts Folder**;
+5. Execute **File > Scripts > aseprite-bridge**.
 
-## Configuração do cliente MCP
+O diálogo do bridge exibirá o estado da conexão (`Connecting...`, `Connected` ou `Disconnected (Reconnecting...)`). Ele tenta se conectar ao servidor em `127.0.0.1:PORT` e reconecta automaticamente.
 
-Compile o projeto antes de configurar o cliente. Depois, use o caminho absoluto de `dist/index.js`:
+> [!IMPORTANT]
+> **Não edite o arquivo `lua/aseprite-bridge.lua` para alterar a porta.** A porta e o token de autenticação são lidos dinamicamente das variáveis de ambiente (`ASEPRITE_PORT` e `ASEPRITE_BRIDGE_TOKEN`). Como o Aseprite é um processo independente, configure essas variáveis no ambiente do sistema ou do usuário e reinicie o Aseprite.
+
+---
+
+## Configuração de Segurança e Ambiente
+
+### 1. Política de Acesso a Arquivos (`ASEPRITE_ALLOWED_PATHS`)
+
+Para impedir que comandos abram ou salvem arquivos fora das pastas do seu projeto, o servidor restringe operações de arquivo às raízes configuradas em `ASEPRITE_ALLOWED_PATHS`:
+
+- **Formato**: lista de caminhos absolutos existentes separados por `;` no Windows ou `:` em ambientes POSIX.
+- **Padrão**: caso a variável esteja ausente ou vazia, o servidor restringe o acesso ao diretório atual (`process.cwd()`), resolvido canonicamente via `realpath`.
+- **Contenção e Symlinks**: links simbólicos que apontam para arquivos dentro das raízes permitidas são resolvidos e aceitos; links simbólicos que apontam para fora das raízes são bloqueados. Alvos de salvamento não podem ser symlinks existentes.
+- **Extensões**: `.ase`, `.aseprite` e `.png` para leitura (`open_sprite`) e gravação (`save_sprite_as`); exclusivamente `.png` para `export_png`.
+- **Proteção No-Clobber**: `save_sprite_as` e `export_png` nunca sobrescrevem arquivos existentes por padrão. Para sobrescrever intencionalmente, é necessário passar o parâmetro `overwrite: true`.
+- **Salvamento Seguro (`save_sprite`)**: a ferramenta `save_sprite` não recebe caminho do usuário nem parâmetro de rota (é invocada sem argumentos). Ela opera diretamente sobre o arquivo já associado ao sprite ativo no Aseprite (`app.sprite.filename`). A validação de integridade `expectedFilePath` é realizada internamente pelo servidor MCP consultando `aseprite_status` antes de despachar o comando ao bridge Lua, que verifica a coincidência exata do caminho antes de executar o salvamento.
+
+### 2. Autenticação por Token no WebSocket (`ASEPRITE_BRIDGE_TOKEN`)
+
+Por padrão, o bridge conecta-se localmente em `127.0.0.1`. Para adicionar uma barreira extra contra acessos locais não autorizados de outros softwares rodando na máquina:
+
+- **Formato**: token de 16 a 128 caracteres contendo apenas caracteres URL-safe ASCII (`[A-Za-z0-9._~-]`).
+- **Geração**: gere um token seguro de 32 bytes aleatórios executando:
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+  ```
+- **Configuração no Aseprite (Windows)**:
+  Como o Aseprite é executado separadamente, defina as variáveis no nível do usuário:
+  ```powershell
+  [Environment]::SetEnvironmentVariable("ASEPRITE_PORT", "32123", "User")
+  [Environment]::SetEnvironmentVariable("ASEPRITE_BRIDGE_TOKEN", "seu-token-gerado", "User")
+  ```
+  Após definir, reinicie o Aseprite e o cliente MCP para carregar as novas variáveis.
+- **Validação e Privacidade**: a validação é feita em tempo constante (`crypto.timingSafeEqual`). O token **nunca** é impresso em logs, console, diálogos ou mensagens de erro. A interface do Aseprite exibe apenas `[Auth: enabled]` ou `[Auth: disabled]`.
+- **Aviso**: conexões no loopback e tokens de autenticação mitigam conexões acidentais ou não autorizadas no host local, mas não eliminam todos os riscos em sistemas compartilhados. Se nenhum token for configurado, o servidor emitirá um aviso único na inicialização indicando que a autenticação no loopback está desabilitada.
+
+---
+
+## Configuração do Cliente MCP
+
+### Exemplo Mínimo (Padrão)
+
+No arquivo de configuração do seu cliente MCP (por exemplo, `gemini-mcp-config.json` ou configuração do Claude Desktop):
 
 ```json
 {
@@ -107,144 +158,110 @@ Compile o projeto antes de configurar o cliente. Depois, use o caminho absoluto 
     "aseprite": {
       "command": "node",
       "args": [
-        "C:/caminho/absoluto/MCP-Aseprite/dist/index.js"
-      ]
+        "C:/caminho/para/MCP-Aseprite/dist/index.js"
+      ],
+      "env": {
+        "ASEPRITE_PORT": "32123",
+        "ASEPRITE_ALLOWED_PATHS": "C:/Projetos/PixelArt"
+      }
     }
   }
 }
 ```
 
-No Windows, barras normais funcionam dentro do JSON. Também é possível escapar barras invertidas, por exemplo `C:\\caminho\\MCP-Aseprite\\dist\\index.js`.
+### Exemplo Endurecido (Com Token e Múltiplas Raízes)
 
-O bridge e o servidor usam a porta `32123` por padrão. Se o servidor for configurado com outra porta por `ASEPRITE_PORT` ou `ASEPRITE_WS_PORT`, o valor de `PORT` no início de `lua/aseprite-bridge.lua` também precisa ser alterado.
+> [!NOTE]
+> O valor `"SubstituaPeloSeuTokenAleatorio12345"` abaixo é um marcador de posição demonstrativo com charset URL-safe válido (`[A-Za-z0-9._~-]`, entre 16 e 128 caracteres). Substitua-o pelo token seguro gerado no seu ambiente.
 
-## Execução
+```json
+{
+  "mcpServers": {
+    "aseprite": {
+      "command": "node",
+      "args": [
+        "C:/caminho/para/MCP-Aseprite/dist/index.js"
+      ],
+      "env": {
+        "ASEPRITE_PORT": "32123",
+        "ASEPRITE_ALLOWED_PATHS": "C:/Projetos/PixelArt;D:/Assets/Sprites",
+        "ASEPRITE_BRIDGE_TOKEN": "SubstituaPeloSeuTokenAleatorio12345"
+      }
+    }
+  }
+}
+```
 
-Quando iniciado pelo cliente MCP, o processo Node.js é aberto automaticamente. Para executá-lo manualmente:
+---
+
+## Execução Manual e Scripts
+
+Para executar o servidor manualmente:
 
 ```bash
 npm start
 ```
 
-No Windows:
+No Windows via PowerShell:
 
 ```powershell
+# Execução padrão
 .\start.ps1
-```
 
-Para iniciar o servidor junto com o Mock Bridge:
+# Especificando porta e diretórios autorizados
+.\start.ps1 -Port 32123 -AllowedPaths @("C:\Projetos\PixelArt")
 
-```powershell
+# Execução com Mock Bridge (headless, sem Aseprite)
 .\start.ps1 -Mock
 ```
 
-O modo mock é útil para testar a integração sem uma instância do Aseprite.
+> [!TIP]
+> **Segurança de Segredos no Terminal:** Evite passar `-BridgeToken` como argumento de linha de comando para não gravar segredos no histórico do shell (`Get-History`, `.bash_history`) ou na listagem de processos do sistema. Prefira sempre definir a variável de ambiente `$env:ASEPRITE_BRIDGE_TOKEN` na sessão do terminal ou nas variáveis de ambiente de usuário antes de executar o script.
 
-## Ferramentas MCP
+---
 
-### Inspeção
+## Resumo das Ferramentas MCP
 
-| Ferramenta | Função |
-|---|---|
-| `aseprite_status` | Informa conexão, documento ativo, dimensões, camada, frame e revisão. |
-| `get_sprite_info` | Retorna a estrutura de camadas, frames, opacidades e modos de mesclagem. |
-| `inspect_sprite` | Retorna preview PNG e dados estruturados dos pixels na mesma chamada. |
-| `get_canvas` | Renderiza o frame ou uma camada como PNG com escala nearest-neighbor. |
-| `get_pixel_grid` | Lê pixels em coordenadas absolutas do canvas. |
-| `get_pixel_grid_preview` | Gera uma visualização ampliada com grade, réguas e destaques. |
+### Inspeção Visual e Leitura
+- `aseprite_status`: Estado da conexão, arquivo ativo, tamanho do canvas, camada e frame selecionados e revisão atual.
+- `get_sprite_info`: Estrutura hierárquica de camadas, frames, opacidades e blend modes.
+- `inspect_sprite`: Preview PNG combinado com matriz de dados de pixels.
+- `get_canvas`: Renderiza o canvas completo ou uma camada isolada como PNG.
+- `get_pixel_grid`: Extração matricial de pixels (formatos hex, rgba ou compact).
+- `get_pixel_grid_preview`: Visualização ampliada com réguas de coordenadas e grade de pixels.
 
-### Edição
+### Edição de Pixels e Formas
+- `set_pixels`: Aplicação de pixels em lote com Undo atômico.
+- `set_pixel`: Aplicação de pixel único.
+- `erase_pixels`: Limpeza de pixels para transparência (`#00000000`).
+- `draw_line`, `draw_rectangle`, `draw_ellipse`: Rasterização de formas geométricas.
+- `flood_fill`, `replace_color`: Preenchimento por tolerância e substituição de cores.
+- `undo`, `redo`: Controle do histórico de edição.
 
-| Ferramenta | Função |
-|---|---|
-| `set_pixels` | Pinta pixels em lote dentro de uma única transação de Undo. |
-| `set_pixel` | Pinta um pixel usando uma cor `#RRGGBBAA`. |
-| `erase_pixels` | Torna uma lista de coordenadas transparente. |
-| `undo` | Desfaz a última edição atômica. |
-| `redo` | Refaz a última edição desfeita. |
-
-### Formas e cores
-
-- Formas: `draw_line`, `draw_rectangle`, `draw_ellipse`.
-- Preenchimento: `flood_fill`, `replace_color`.
-- Histórico visual: `get_changes_since`.
-- Paleta: `get_palette`, `set_palette_color`, `find_palette_color`.
-
-### Camadas, animação e arquivos
-
+### Camadas, Animação e Arquivos
 - Camadas: `list_layers`, `create_layer`, `rename_layer`, `delete_layer`, `select_layer`, `set_layer_visibility`, `set_layer_opacity`, `move_layer`, `create_group`.
-- Frames e tags: `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `delete_frame`, `set_frame_duration`, `create_tag`, `list_tags`.
-- Arquivos e canvas: `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `export_png`, `resize_canvas`.
+- Frames e Tags: `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `delete_frame`, `set_frame_duration`, `create_tag`, `list_tags`.
+- Arquivos: `new_sprite`, `open_sprite`, `save_sprite` (salva o arquivo ativo sem parâmetros do usuário, validado internamente via `aseprite_status`), `save_sprite_as` (com `overwrite`), `export_png` (com `overwrite`), `resize_canvas`.
 
-As operações destrutivas de exclusão exigem `confirm: true`. O servidor nunca salva o documento automaticamente.
-
-## Exemplo de fluxo
-
-```text
-1. aseprite_status()
-2. inspect_sprite({ scale: 4, format: "compact" })
-3. set_pixels({
-     pixels: [
-       { x: 14, y: 8, color: "#0088FFFF" }
-     ],
-     returnPreview: true
-   })
-4. inspect_sprite({ scale: 4, format: "compact" })
-5. save_sprite()
-```
-
-Use `save_sprite` ou `save_sprite_as` somente depois de validar o resultado. Até essa chamada, as alterações permanecem no documento aberto sem sobrescrever o arquivo em disco.
-
-## Comandos de desenvolvimento
-
-| Comando | Descrição |
-|---|---|
-| `npm run build` | Compila o TypeScript em `dist/`. |
-| `npm start` | Executa o servidor compilado. |
-| `npm run dev` | Mantém o compilador TypeScript em modo watch. |
-| `npm test` | Executa toda a suíte com Vitest. |
-| `npm run test:unit` | Executa os testes unitários. |
-| `npm run test:integration` | Executa os testes de integração. |
-| `npm run test:e2e` | Executa os testes de ponta a ponta. |
-| `npm run test:watch` | Executa o Vitest em modo interativo. |
-| `npm run typecheck` | Verifica os tipos sem gerar arquivos. |
-
-## Segurança e comportamento
-
-- O WebSocket aceita apenas endereços de loopback.
-- O canal `stdout` é reservado ao protocolo MCP; logs são enviados para `stderr`.
-- O bridge modifica somente o documento ativo no Aseprite.
-- O salvamento em disco depende de uma chamada explícita.
-- Edições em lote são agrupadas para permitir Undo atômico.
-- Entradas, coordenadas, limites e cores são validados antes da execução.
+---
 
 ## Solução de problemas
 
-### O bridge permanece desconectado
+### O bridge permanece desconectado no Aseprite
+1. Confirme que o servidor MCP está em execução.
+2. Verifique se a porta coincide (`ASEPRITE_PORT`, padrão `32123`).
+3. Se você configurou `ASEPRITE_BRIDGE_TOKEN` no servidor MCP, confirme que a mesma variável foi definida no ambiente do Aseprite e que o Aseprite foi reiniciado.
+4. Tentativas com token divergente são rejeitadas com o código `1008 (Invalid bridge authentication)`.
 
-- Confirme que o processo MCP está em execução.
-- Confirme que o bridge foi carregado em **File > Scripts**.
-- Verifique se a porta `32123` está livre.
-- Mantenha o mesmo número de porta no servidor e no bridge Lua.
+### Erro de acesso negado em operações de arquivo
+- Se receber `Access denied: path is outside allowed roots`, adicione o diretório do arquivo à variável `ASEPRITE_ALLOWED_PATHS`.
+- Certifique-se de que os caminhos em `ASEPRITE_ALLOWED_PATHS` sejam absolutos e usem `;` como separador no Windows.
 
-### O cliente não encontra `dist/index.js`
+### Arquivo já existe e não é salvo
+- Por padrão, o servidor adota a política no-clobber. Ao salvar em um arquivo existente via `save_sprite_as` ou exportar via `export_png`, inclua `"overwrite": true` nos argumentos da ferramenta.
 
-Execute:
+---
 
-```bash
-npm install
-npm run build
-```
+## Licença
 
-Depois confirme que a configuração do cliente usa um caminho absoluto.
-
-### Os testes falham por conflito de porta
-
-Feche processos antigos do servidor e execute `npm test` novamente. Os testes automatizados usam o Mock Bridge e não exigem o Aseprite aberto.
-
-## Referências
-
-- [Model Context Protocol](https://modelcontextprotocol.io/)
-- [Documentação de scripts do Aseprite](https://www.aseprite.org/docs/scripting/)
-- [API do Aseprite](https://www.aseprite.org/api/)
-- [Pixel Joint: The Pixel Art Tutorial](https://pixeljoint.com/forum/forum_posts.asp?TID=11299)
+Distribuído sob a licença MIT. Consulte o arquivo [LICENSE](LICENSE) para obter mais informações.

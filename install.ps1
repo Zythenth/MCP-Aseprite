@@ -42,9 +42,14 @@ Write-Host "[3/5] Installing npm dependencies..." -ForegroundColor Yellow
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptDir
 
-npm install
+$lockFile = Join-Path $scriptDir "package-lock.json"
+if (Test-Path -LiteralPath $lockFile) {
+    npm ci --ignore-scripts --no-audit --no-fund
+} else {
+    npm install --ignore-scripts --no-audit --no-fund
+}
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "npm install failed."
+    Write-Error "Dependency installation failed."
     exit $LASTEXITCODE
 }
 Write-Host "      Dependencies installed successfully." -ForegroundColor Green
@@ -73,6 +78,7 @@ if (-not $SkipTests) {
 
 # Optional: Copy Lua Bridge to Aseprite Scripts Folder
 $appData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
+$asepriteBaseDir = Join-Path $appData "Aseprite"
 $asepriteScriptsDir = Join-Path $appData "Aseprite\scripts"
 $luaSource = Join-Path $scriptDir "lua\aseprite-bridge.lua"
 
@@ -81,9 +87,11 @@ Write-Host "========================================================" -Foregroun
 Write-Host "   Aseprite Lua Bridge Integration                     " -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan
 
-if (Test-Path $luaSource) {
-    if (Test-Path (Join-Path $appData "Aseprite")) {
-        if (-not (Test-Path $asepriteScriptsDir)) {
+$shouldInstallScript = $InstallLuaToAseprite -or (Test-Path -LiteralPath $asepriteBaseDir)
+
+if (Test-Path -LiteralPath $luaSource) {
+    if ($shouldInstallScript) {
+        if (-not (Test-Path -LiteralPath $asepriteScriptsDir)) {
             New-Item -ItemType Directory -Path $asepriteScriptsDir -Force | Out-Null
         }
         $targetLua = Join-Path $asepriteScriptsDir "aseprite-bridge.lua"
@@ -95,8 +103,6 @@ if (Test-Path $luaSource) {
         Write-Host "Notice: Aseprite directory not found at $appData\Aseprite." -ForegroundColor Gray
         Write-Host "To install the bridge manually, in Aseprite go to: File -> Scripts -> Open Scripts Folder" -ForegroundColor Yellow
         Write-Host "and copy: $luaSource into that directory." -ForegroundColor Yellow
+        Write-Host "(Or re-run installer with -InstallLuaToAseprite to force create the directory)." -ForegroundColor Gray
     }
 }
-
-Write-Host ""
-Write-Host "Installation Complete! You can now start the server with: .\start.ps1" -ForegroundColor Green

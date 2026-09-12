@@ -1,7 +1,7 @@
 {
   "name": "aseprite-mcp",
   "version": "0.1.0",
-  "description": "Official Model Context Protocol (MCP) server for Aseprite pixel art creation and inspection",
+  "description": "Model Context Protocol (MCP) server for Aseprite pixel art creation, editing, and inspection",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,6 +12,8 @@
     "dist",
     "lua",
     "README.md",
+    "LICENSE",
+    "examples",
     "install.ps1",
     "start.ps1"
   ],
