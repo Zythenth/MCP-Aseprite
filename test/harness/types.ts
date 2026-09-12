@@ -1,6 +1,5 @@
 /**
  * Type definitions for E2E Test Harness & MCP Server Interface Contracts.
- * Shared contracts for the test harness and MCP server.
  */
 
 export interface ImageContent {

@@ -1,13 +1,13 @@
 /**
  * Tier 1: Feature Coverage Test Suite.
  * Validates >= 5 test cases per feature across all primary and secondary tools.
- * Covers the primary and secondary tool contracts.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   TestHarness,
   assertToolSuccess,
+  assertToolError,
   extractTextContent,
   extractImageContent,
   parsePngDimensions,
@@ -341,7 +341,7 @@ describe("Tier 1: Feature Coverage", () => {
   describe("Feature: get_changes_since", () => {
     it("Case 1: returns changed: false when queried revision matches current", async () => {
       const status = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status"));
-      const res = await harness.callTool("get_changes_since", { revision: status.revision });
+      const res = await harness.callTool("get_changes_since", { sinceRevision: status.revision });
       assertToolSuccess(res);
       const data = extractTextContent<any>(res);
       expect(data.changed).toBe(false);
@@ -350,7 +350,7 @@ describe("Tier 1: Feature Coverage", () => {
     it("Case 2: returns exact bounds and pixel count after single line draw", async () => {
       const r0 = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status")).revision!;
       await harness.callTool("draw_line", { x0: 2, y0: 2, x1: 6, y1: 2, color: "#FF0000FF" });
-      const res = await harness.callTool("get_changes_since", { revision: r0 });
+      const res = await harness.callTool("get_changes_since", { sinceRevision: r0 });
       assertToolSuccess(res);
       const diff = extractTextContent<any>(res);
       expect(diff.changed).toBe(true);
@@ -362,7 +362,7 @@ describe("Tier 1: Feature Coverage", () => {
       const r0 = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status")).revision!;
       await harness.callTool("set_pixel", { x: 1, y: 1, color: "#00FF00FF" });
       await harness.callTool("set_pixel", { x: 8, y: 8, color: "#0000FFFF" });
-      const res = await harness.callTool("get_changes_since", { revision: r0 });
+      const res = await harness.callTool("get_changes_since", { sinceRevision: r0 });
       assertToolSuccess(res);
       const diff = extractTextContent<any>(res);
       expect(diff.changed).toBe(true);
@@ -374,7 +374,7 @@ describe("Tier 1: Feature Coverage", () => {
     it("Case 4: returns modified count after flood_fill", async () => {
       const r0 = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status")).revision!;
       await harness.callTool("flood_fill", { x: 0, y: 0, color: "#ABCDEFFF" });
-      const res = await harness.callTool("get_changes_since", { revision: r0 });
+      const res = await harness.callTool("get_changes_since", { sinceRevision: r0 });
       assertToolSuccess(res);
       const diff = extractTextContent<any>(res);
       expect(diff.changed).toBe(true);
@@ -382,7 +382,7 @@ describe("Tier 1: Feature Coverage", () => {
     });
 
     it("Case 5: indicates fullRefreshRequired when queried revision is unknown or pruned", async () => {
-      const res = await harness.callTool("get_changes_since", { revision: 99999 });
+      const res = await harness.callTool("get_changes_since", { sinceRevision: 99999 });
       assertToolSuccess(res);
       const diff = extractTextContent<any>(res);
       expect(diff.changed).toBe(true);
@@ -413,19 +413,23 @@ describe("Tier 1: Feature Coverage", () => {
 
     it("Case 3: find_palette_color in exact mode returns correct index", async () => {
       await harness.callTool("set_palette_color", { index: 12, color: "#123456FF" });
-      const res = await harness.callTool("find_palette_color", { color: "#123456FF", matchMode: "exact" });
+      const res = await harness.callTool("find_palette_color", { color: "#123456FF", findNearest: false });
       assertToolSuccess(res);
       const data = extractTextContent<any>(res);
       expect(data.found).toBe(true);
       expect(data.index).toBe(12);
+      expect(data.exact).toBe(true);
+      expect(data.distance).toBe(0);
     });
 
     it("Case 4: find_palette_color in nearest mode returns closest match", async () => {
       await harness.callTool("set_palette_color", { index: 20, color: "#FFFFFF00" });
-      const res = await harness.callTool("find_palette_color", { color: "#FFFFFF10", matchMode: "nearest" });
+      const res = await harness.callTool("find_palette_color", { color: "#FFFFFF10", findNearest: true });
       assertToolSuccess(res);
       const data = extractTextContent<any>(res);
       expect(data.found).toBe(true);
+      expect(data.exact).toBe(false);
+      expect(data.distance).toBeGreaterThan(0);
     });
 
     it("Case 5: modifying palette color does not corrupt neighboring indices", async () => {
@@ -470,8 +474,8 @@ describe("Tier 1: Feature Coverage", () => {
       await harness.callTool("set_pixel", { x: 3, y: 3, color: "#FF0000FF" });
       const hideRes = await harness.callTool("set_layer_visibility", { layer: "DecoLayer", visible: false });
       assertToolSuccess(hideRes);
-      const grid = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid"));
-      assertPixelInGrid(grid, 3, 3, "#00000000"); // Hidden layer cel omitted from composite
+      const inspect = extractTextContent<any>(await harness.callTool("inspect_sprite"));
+      assertPixelInGrid(inspect.pixelGrid, 3, 3, "#00000000"); // Hidden layer cel omitted from composite
     });
 
     it("Case 5: set_layer_opacity modifies layer blending weight", async () => {
@@ -495,11 +499,12 @@ describe("Tier 1: Feature Coverage", () => {
     });
 
     it("Case 2: create_frame appends new blank frame", async () => {
-      const res = await harness.callTool("create_frame", { durationMs: 150 });
+      const res = await harness.callTool("create_frame", { duration: 150 });
       assertToolSuccess(res);
       const data = extractTextContent<any>(res);
       expect(data.totalFrames).toBe(2);
       expect(data.createdFrameNumber).toBe(2);
+      expect(data.durationMs).toBe(150);
     });
 
     it("Case 3: duplicate_frame clones cels into new frame", async () => {
@@ -524,13 +529,15 @@ describe("Tier 1: Feature Coverage", () => {
     it("Case 5: create_tag and list_tags manages animation tags", async () => {
       await harness.callTool("create_frame", {});
       const tagRes = await harness.callTool("create_tag", {
-        name: "walk", fromFrame: 1, toFrame: 2, direction: "forward",
+        name: "walk", fromFrame: 1, toFrame: 2, direction: "forward", color: "#336699FF",
       });
       assertToolSuccess(tagRes);
       const listRes = await harness.callTool("list_tags");
       assertToolSuccess(listRes);
       const data = extractTextContent<any>(listRes);
-      expect(data.tags.some((t: any) => t.name === "walk")).toBe(true);
+      const tag = data.tags.find((t: any) => t.name === "walk");
+      expect(tag).toBeDefined();
+      expect(tag.color).toBe("#336699FF");
     });
   });
 
@@ -615,6 +622,290 @@ describe("Tier 1: Feature Coverage", () => {
       assertToolSuccess(res);
       const data = extractTextContent<any>(res);
       expect(data.frames.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // ===========================================================================
+  // Feature Group: Phase 4A Target Selection & Color Tolerance
+  // ===========================================================================
+  describe("Feature: Phase 4A Target Selection and Tolerance", () => {
+    it("targets requested layer by layerName and layerIndex without changing active layer", async () => {
+      await harness.callTool("create_layer", { name: "Overlay" });
+      const statusBefore = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status"));
+      expect(statusBefore.activeLayer).toBe(1);
+
+      const resName = await harness.callTool("set_pixel", {
+        layerName: "Layer 1",
+        x: 2,
+        y: 2,
+        color: "#123456FF",
+      });
+      assertToolSuccess(resName);
+
+      const statusAfter = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status"));
+      expect(statusAfter.activeLayer).toBe(1); // active layer unchanged!
+
+      const resIndex = await harness.callTool("set_pixel", {
+        layerIndex: 0,
+        x: 3,
+        y: 3,
+        color: "#654321FF",
+      });
+      assertToolSuccess(resIndex);
+
+      const baseGrid = extractTextContent<PixelGridResult>(
+        await harness.callTool("get_pixel_grid", { layerName: "Layer 1" })
+      );
+      assertPixelInGrid(baseGrid, 2, 2, "#123456FF");
+      assertPixelInGrid(baseGrid, 3, 3, "#654321FF");
+
+      const overlayGrid = extractTextContent<PixelGridResult>(
+        await harness.callTool("get_pixel_grid", { layerIndex: 1 })
+      );
+      assertPixelInGrid(overlayGrid, 2, 2, "#00000000");
+    });
+
+    it("targets non-active frame by frameNumber without changing active frame", async () => {
+      await harness.callTool("create_frame", { duration: 100 });
+      const statusBefore = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status"));
+      expect(statusBefore.activeFrame).toBe(2);
+
+      const res = await harness.callTool("set_pixel", {
+        frameNumber: 1,
+        x: 5,
+        y: 5,
+        color: "#00FF00FF",
+      });
+      assertToolSuccess(res);
+
+      const statusAfter = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status"));
+      expect(statusAfter.activeFrame).toBe(2); // active frame unchanged!
+
+      const f1Grid = extractTextContent<PixelGridResult>(
+        await harness.callTool("get_pixel_grid", { frameIndex: 1 })
+      );
+      assertPixelInGrid(f1Grid, 5, 5, "#00FF00FF");
+
+      const f2Grid = extractTextContent<PixelGridResult>(
+        await harness.callTool("get_pixel_grid", { frameIndex: 2 })
+      );
+      assertPixelInGrid(f2Grid, 5, 5, "#00000000");
+    });
+
+    it("fails when conflicting layer selectors are provided", async () => {
+      await harness.callTool("create_layer", { name: "SecondLayer" });
+      const res = await harness.callTool("set_pixel", {
+        layerIndex: 0,
+        layerName: "SecondLayer",
+        x: 0,
+        y: 0,
+        color: "#FF0000FF",
+      });
+      assertToolError(res, "CONFLICTING_SELECTORS");
+    });
+
+    it("repeated writes of the same color report zero changes and do not advance revision", async () => {
+      const status1 = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status"));
+      const rev0 = status1.revision!;
+
+      const res1 = await harness.callTool("set_pixel", { x: 7, y: 7, color: "#ABCDEFFF" });
+      assertToolSuccess(res1);
+      const data1 = extractTextContent<any>(res1);
+      expect(data1.pixelsModified).toBe(1);
+      expect(data1.revision).toBe(rev0 + 1);
+
+      // Repeat identical write
+      const res2 = await harness.callTool("set_pixel", { x: 7, y: 7, color: "#ABCDEFFF" });
+      assertToolSuccess(res2);
+      const data2 = extractTextContent<any>(res2);
+      expect(data2.pixelsModified).toBe(0);
+      expect(data2.revision).toBe(rev0 + 1); // revision did NOT advance!
+
+      // Diff confirms no changes
+      const diff = await harness.callTool("get_changes_since", { sinceRevision: rev0 + 1 });
+      assertToolSuccess(diff);
+      const diffData = extractTextContent<any>(diff);
+      expect(diffData.changed).toBe(false);
+    });
+
+    it("tolerance 0 versus nonzero changes flood_fill and replace_color behavior", async () => {
+      await harness.callTool("set_pixel", { x: 0, y: 0, color: "#808080FF" });
+      await harness.callTool("set_pixel", { x: 1, y: 0, color: "#818080FF" }); // delta = 1
+
+      // replace_color tolerance 0
+      const rep0 = await harness.callTool("replace_color", {
+        fromColor: "#808080FF",
+        toColor: "#FF0000FF",
+        tolerance: 0,
+      });
+      assertToolSuccess(rep0);
+      let g = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid"));
+      assertPixelInGrid(g, 0, 0, "#FF0000FF");
+      assertPixelInGrid(g, 1, 0, "#818080FF");
+
+      // Reset
+      await harness.callTool("set_pixel", { x: 0, y: 0, color: "#808080FF" });
+
+      // replace_color tolerance 1
+      const rep1 = await harness.callTool("replace_color", {
+        fromColor: "#808080FF",
+        toColor: "#0000FFFF",
+        tolerance: 1,
+      });
+      assertToolSuccess(rep1);
+      g = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid"));
+      assertPixelInGrid(g, 0, 0, "#0000FFFF");
+      assertPixelInGrid(g, 1, 0, "#0000FFFF");
+
+      // Test flood_fill with tolerance:
+      await harness.callTool("set_pixel", { x: 10, y: 10, color: "#101010FF" });
+      await harness.callTool("set_pixel", { x: 11, y: 10, color: "#111111FF" }); // delta = 3
+
+      // Flood fill at (10,10) with tolerance 0 does not cross to (11,10)
+      const fill0 = await harness.callTool("flood_fill", { x: 10, y: 10, color: "#AABBCCFF", tolerance: 0 });
+      assertToolSuccess(fill0);
+      g = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid"));
+      assertPixelInGrid(g, 10, 10, "#AABBCCFF");
+      assertPixelInGrid(g, 11, 10, "#111111FF");
+
+      // Repaint baseline before second flood fill
+      await harness.callTool("set_pixel", { x: 10, y: 10, color: "#101010FF" });
+      await harness.callTool("set_pixel", { x: 11, y: 10, color: "#111111FF" });
+
+      // Flood fill with tolerance 1 (3 <= 1*4) crosses and fills
+      const fill1 = await harness.callTool("flood_fill", { x: 10, y: 10, color: "#FFFFFF00", tolerance: 1 });
+      assertToolSuccess(fill1);
+      g = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid"));
+      assertPixelInGrid(g, 10, 10, "#FFFFFF00");
+      assertPixelInGrid(g, 11, 10, "#FFFFFF00");
+    });
+
+    it("rejects invalid frame, layer, or seed selectors", async () => {
+      const errLayer = await harness.callTool("set_pixel", { layerIndex: 50, x: 0, y: 0, color: "#FF0000FF" });
+      assertToolError(errLayer);
+
+      const errName = await harness.callTool("set_pixel", { layerName: "Unknown", x: 0, y: 0, color: "#FF0000FF" });
+      assertToolError(errName);
+
+      const errFrame = await harness.callTool("set_pixel", { frameNumber: 50, x: 0, y: 0, color: "#FF0000FF" });
+      assertToolError(errFrame);
+
+      const errSeed = await harness.callTool("flood_fill", { x: 100, y: 100, color: "#FF0000FF" });
+      assertToolError(errSeed);
+    });
+  });
+
+  describe("Feature: resize_canvas and export_png", () => {
+    it("resize_canvas expands canvas with anchor center and shifts content offset", async () => {
+      // Working sprite is 16x16 by default in beforeEach
+      await harness.callTool("set_pixel", { x: 2, y: 2, color: "#FF0000FF" });
+      const res = await harness.callTool("resize_canvas", { width: 24, height: 24, anchor: "center" });
+      assertToolSuccess(res);
+      const data = extractTextContent<any>(res);
+      expect(data.width).toBe(24);
+      expect(data.height).toBe(24);
+      expect(data.anchor).toBe("center");
+      expect(data.contentOffset).toEqual({ x: 4, y: 4 }); // (24-16)/2 = 4
+
+      const grid = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid"));
+      expect(grid.width).toBe(24);
+      expect(grid.height).toBe(24);
+      // Pixel (2,2) shifted by +4,+4 to (6,6)
+      assertPixelInGrid(grid, 6, 6, "#FF0000FF");
+      // Old (2,2) and border areas are blank
+      assertPixelInGrid(grid, 2, 2, "#00000000");
+      assertPixelInGrid(grid, 0, 0, "#00000000");
+    });
+
+    it("resize_canvas shrinks canvas and clips out-of-bounds pixels", async () => {
+      await harness.callTool("set_pixel", { x: 2, y: 2, color: "#00FF00FF" });
+      await harness.callTool("set_pixel", { x: 14, y: 14, color: "#0000FFFF" });
+
+      const res = await harness.callTool("resize_canvas", { width: 8, height: 8, anchor: "top_left" });
+      assertToolSuccess(res);
+      const data = extractTextContent<any>(res);
+      expect(data.width).toBe(8);
+      expect(data.height).toBe(8);
+      expect(data.contentOffset).toEqual({ x: 0, y: 0 });
+
+      const grid = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid"));
+      expect(grid.width).toBe(8);
+      expect(grid.height).toBe(8);
+      assertPixelInGrid(grid, 2, 2, "#00FF00FF");
+    });
+
+    it("resize_canvas rejects invalid dimensions or unknown anchor", async () => {
+      const errDim = await harness.callTool("resize_canvas", { width: 0, height: 16 });
+      assertToolError(errDim);
+
+      const errAnchor = await harness.callTool("resize_canvas", { width: 16, height: 16, anchor: "diagonal" });
+      assertToolError(errAnchor);
+    });
+
+    it("export_png exports with selected frame and nearest-neighbor scale factor", async () => {
+      await harness.callTool("create_frame", { duration: 100 });
+      const status = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status"));
+      const revBefore = status.revision!;
+
+      const res = await harness.callTool("export_png", {
+        outputPath: "test_export.png",
+        frameNumber: 1,
+        scale: 2,
+      });
+      assertToolSuccess(res);
+      const data = extractTextContent<any>(res);
+      expect(data.outputPath).toBe("test_export.png");
+      expect(data.frameNumber).toBe(1);
+      expect(data.scale).toBe(2);
+      expect(data.width).toBe(32); // 16 * 2
+      expect(data.height).toBe(32); // 16 * 2
+
+      // Revision must not advance on export
+      const statusAfter = extractTextContent<SpriteStatus>(await harness.callTool("aseprite_status"));
+      expect(statusAfter.revision).toBe(revBefore);
+    });
+
+    it("export_png rejects invalid frame or scale values", async () => {
+      const errFrame = await harness.callTool("export_png", {
+        outputPath: "err.png",
+        frameNumber: 99,
+      });
+      assertToolError(errFrame);
+
+      const errScale = await harness.callTool("export_png", {
+        outputPath: "err.png",
+        scale: 50,
+      });
+      assertToolError(errScale);
+    });
+  });
+
+  describe("visual inspection & token efficiency (get_canvas layer isolation and get_pixel_grid region)", () => {
+    it("get_canvas renders isolated layer and rejects group layer", async () => {
+      await harness.callTool("create_layer", { name: "Overlay" });
+      await harness.callTool("set_pixel", { layerName: "Overlay", x: 2, y: 2, color: "#00FF00FF" });
+
+      const canvasRes = await harness.callTool("get_canvas", { layerName: "Overlay" });
+      expect(canvasRes.isError).toBeFalsy();
+      const imgContent = canvasRes.content.find((c: any) => c.type === "image");
+      expect(imgContent).toBeDefined();
+
+      await harness.callTool("create_group", { name: "GroupFolder" });
+      const groupRes = await harness.callTool("get_canvas", { layerName: "GroupFolder" });
+      assertToolError(groupRes, "CANNOT_RENDER_GROUP", "Cannot render group layer.");
+    });
+
+    it("get_pixel_grid extracts sub-region and clips to borders", async () => {
+      const res = await harness.callTool("get_pixel_grid", {
+        region: { x: 2, y: 2, width: 2, height: 2 },
+        format: "hex",
+      });
+      expect(res.isError).toBeFalsy();
+      const gridData = extractTextContent<any>(res);
+      expect(gridData.width).toBe(2);
+      expect(gridData.height).toBe(2);
+      expect(gridData.origin).toEqual({ x: 2, y: 2 });
+      expect(gridData.region).toEqual({ x: 2, y: 2, width: 2, height: 2 });
     });
   });
 });

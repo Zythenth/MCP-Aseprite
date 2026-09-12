@@ -6,6 +6,7 @@ import { CommandDispatcher } from "../../src/bridge/dispatcher.js";
 import { BridgeState } from "../../src/bridge/state.js";
 import { BridgeWebSocketServer } from "../../src/bridge/wsServer.js";
 import { startMockBridge, stopMockBridge, MockBridgeInstance } from "../../src/mock/index.js";
+import { config } from "../../src/config.js";
 
 describe("aseprite_status MCP Tool Integration Tests", () => {
   let dispatcher: CommandDispatcher;
@@ -56,6 +57,7 @@ describe("aseprite_status MCP Tool Integration Tests", () => {
     expect(parsed.connected).toBe(false);
     expect(parsed.hasActiveSprite).toBe(false);
     expect(parsed.revision).toBe(0);
+    expect(parsed.port).toBe(config.port);
     expect(parsed.message).toContain("Aseprite is not connected");
   });
 

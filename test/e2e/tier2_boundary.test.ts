@@ -82,11 +82,11 @@ describe("Tier 2: Boundary & Corner Cases", () => {
       assertToolSuccess(undoRes);
     });
 
-    it("Case 5: validates max dimension limits (8192 boundary)", async () => {
-      const validMax = await harness.callTool("new_sprite", { width: 8192, height: 8192 });
+    it("Case 5: validates max dimension limits (4096 boundary)", async () => {
+      const validMax = await harness.callTool("new_sprite", { width: 4096, height: 1 });
       assertToolSuccess(validMax);
 
-      const overLimit = await harness.callTool("new_sprite", { width: 8193, height: 8192 });
+      const overLimit = await harness.callTool("new_sprite", { width: 4097, height: 1 });
       assertToolError(overLimit, "INVALID_DIMENSIONS");
     });
   });
@@ -158,7 +158,7 @@ describe("Tier 2: Boundary & Corner Cases", () => {
       // Mock layer lock
       const listRes = await harness.callTool("list_layers");
       const listData = extractTextContent<any>(listRes);
-      listData.layers[0].isLocked = true;
+      harness.setLayerLocked(listData.layers[0].index, true);
 
       const paintRes = await harness.callTool("set_pixel", { x: 2, y: 2, color: "#FF0000FF" });
       assertToolError(paintRes, "LAYER_LOCKED");
@@ -172,9 +172,13 @@ describe("Tier 2: Boundary & Corner Cases", () => {
       const paintRes = await harness.callTool("set_pixel", { x: 6, y: 6, color: "#00FF00FF" });
       assertToolSuccess(paintRes);
 
-      // But composite grid omits it (remains transparent)
-      const grid = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid"));
-      assertPixelInGrid(grid, 6, 6, "#00000000");
+      // Hidden layer's own cel was actually updated
+      const celGrid = extractTextContent<PixelGridResult>(await harness.callTool("get_pixel_grid", { layerName: "HiddenLayer" }));
+      assertPixelInGrid(celGrid, 6, 6, "#00FF00FF");
+
+      // But composite render omits it (remains transparent)
+      const inspect = extractTextContent<any>(await harness.callTool("inspect_sprite"));
+      assertPixelInGrid(inspect.pixelGrid, 6, 6, "#00000000");
     });
 
     it("Case 5: rejects deleting a non-existent layer with LAYER_NOT_FOUND", async () => {

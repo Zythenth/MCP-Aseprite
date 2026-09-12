@@ -8,6 +8,81 @@ import { scaleNearestNeighbor } from "../../image/scaling.js";
 import { applyCheckerboardBackdrop } from "../../image/checkerboard.js";
 import { generatePixelGridPreview } from "../../image/preview.js";
 
+export function applyLegacyRegionFallback(
+  res: any,
+  region: { x: number; y: number; width: number; height: number }
+): any {
+  if (!res || !Array.isArray(res.grid)) {
+    return res;
+  }
+
+  const origW = res.width;
+  const origH = res.height;
+  if (
+    typeof origW !== "number" ||
+    typeof origH !== "number" ||
+    !Number.isFinite(origW) ||
+    !Number.isFinite(origH) ||
+    !Number.isInteger(origW) ||
+    !Number.isInteger(origH) ||
+    origW <= 0 ||
+    origH <= 0
+  ) {
+    throw new Error("Invalid canvas dimensions returned from bridge.");
+  }
+
+  const rx = region.x;
+  const ry = region.y;
+  const rw = region.width;
+  const rh = region.height;
+
+  if (rx >= origW || ry >= origH) {
+    throw new Error("Region origin outside canvas bounds.");
+  }
+
+  const endX = Math.min(origW, rx + rw);
+  const endY = Math.min(origH, ry + rh);
+  const croppedWidth = endX - rx;
+  const croppedHeight = endY - ry;
+
+  const subGrid: any[] = [];
+  for (let y = ry; y < endY; y++) {
+    const row: any[] = [];
+    for (let x = rx; x < endX; x++) {
+      row.push(res.grid[y]?.[x] ?? (res.format === "compact" ? 0 : "#00000000"));
+    }
+    subGrid.push(row);
+  }
+
+  if (res.format === "compact" && Array.isArray(res.palette)) {
+    const oldPalette = res.palette;
+    const newPalette: any[] = [];
+    const indexMap = new Map<number, number>();
+
+    for (let y = 0; y < subGrid.length; y++) {
+      for (let x = 0; x < subGrid[y].length; x++) {
+        const oldIdx = subGrid[y][x];
+        if (typeof oldIdx === "number" && oldIdx >= 0 && oldIdx < oldPalette.length) {
+          if (!indexMap.has(oldIdx)) {
+            indexMap.set(oldIdx, newPalette.length);
+            newPalette.push(oldPalette[oldIdx]);
+          }
+          subGrid[y][x] = indexMap.get(oldIdx);
+        }
+      }
+    }
+    res.palette = newPalette;
+  }
+
+  res.grid = subGrid;
+  res.width = croppedWidth;
+  res.height = croppedHeight;
+  res.origin = { x: rx, y: ry };
+  res.region = { x: rx, y: ry, width: croppedWidth, height: croppedHeight };
+
+  return res;
+}
+
 export function registerVisualTools(
   server: McpServer,
   dispatcher: CommandDispatcher,
@@ -129,19 +204,9 @@ export function registerVisualTools(
           stateTracker.setRevision(res.revision);
         }
 
-        // Apply region filter if specified
-        if (params.region && Array.isArray(res.grid)) {
-          const { x: rx, y: ry, width: rw, height: rh } = params.region;
-          const subGrid: any[] = [];
-          for (let y = ry; y < Math.min(res.height, ry + rh); y++) {
-            const row: any[] = [];
-            for (let x = rx; x < Math.min(res.width, rx + rw); x++) {
-              row.push(res.grid[y]?.[x] ?? "#00000000");
-            }
-            subGrid.push(row);
-          }
-          res.grid = subGrid;
-          res.region = params.region;
+        // Apply region filter fallback only for older bridges that do not return region/origin natively
+        if (params.region && !res.region && !res.origin && Array.isArray(res.grid)) {
+          applyLegacyRegionFallback(res, params.region);
         }
 
         return {

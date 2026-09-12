@@ -11,10 +11,11 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
   let wsServer: BridgeWebSocketServer;
   let clientSockets: WebSocket[] = [];
 
-  const createClient = (port?: number): Promise<WebSocket> => {
+  const createClient = (port?: number, token?: string): Promise<WebSocket> => {
     return new Promise((resolve, reject) => {
       const targetPort = port ?? wsServer.getPort();
-      const ws = new WebSocket(`ws://127.0.0.1:${targetPort}`);
+      const url = token ? `ws://127.0.0.1:${targetPort}/?token=${encodeURIComponent(token)}` : `ws://127.0.0.1:${targetPort}`;
+      const ws = new WebSocket(url);
       clientSockets.push(ws);
       ws.on("open", () => resolve(ws));
       ws.on("error", (err) => reject(err));
@@ -302,37 +303,192 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
     expect(dispatcher.isConnected()).toBe(false);
   });
 
-  it("ADV-1: In-flight requests are immediately aborted with DISCONNECTED when client is replaced", async () => {
+  it("ADV-1: First-client pinning rejects incoming second client with 1008 while established client and in-flight request remain usable", async () => {
     // 1. Client 1 connects
     const ws1 = await createClient();
     expect(wsServer.isConnected()).toBe(true);
 
-    // 2. Dispatcher sends command to client 1 (client 1 does not answer)
-    const p1 = dispatcher.send("slow_cmd_on_ws1", {}, 5000);
-    // Attach noop catch handler to prevent Node.js unhandledRejection tick while awaiting createClient()
-    p1.catch(() => {});
-    expect(dispatcher.getPendingCount()).toBe(1);
-
-    // 3. Client 2 connects immediately, superseding client 1
-    const ws2 = await createClient();
-    expect(wsServer.isConnected()).toBe(true);
-
-    // In-flight command dispatched to client 1 must be rejected immediately upon replacement
-    const start = Date.now();
-    await expect(p1).rejects.toThrow(/Client replaced/);
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(300);
-
-    // Client 2 responds to its own commands
-    ws2.on("message", (data) => {
-      const req = JSON.parse(data.toString());
-      ws2.send(JSON.stringify({ id: req.id, success: true, result: "from_ws2" }));
+    // Setup Client 1 handler for in-flight command
+    let respondToInFlight: () => void;
+    const inFlightBarrier = new Promise<void>((resolve) => {
+      respondToInFlight = resolve;
     });
 
-    // Send command to client 2 - succeeds
-    const res2 = await dispatcher.send("cmd_on_ws2", {});
-    expect(res2).toBe("from_ws2");
+    ws1.on("message", (data) => {
+      const req = JSON.parse(data.toString());
+      if (req.command === "slow_cmd_on_ws1") {
+        inFlightBarrier.then(() => {
+          if (ws1.readyState === WebSocket.OPEN) {
+            ws1.send(JSON.stringify({ id: req.id, success: true, result: "from_ws1" }));
+          }
+        });
+      } else if (req.command === "second_cmd_on_ws1") {
+        ws1.send(JSON.stringify({ id: req.id, success: true, result: "second_ok" }));
+      }
+    });
+
+    // 2. Dispatcher sends command to Client 1 (held in-flight)
+    const p1 = dispatcher.send("slow_cmd_on_ws1", {}, 5000);
+    expect(dispatcher.getPendingCount()).toBe(1);
+
+    // 3. Client 2 attempts to connect, but must be rejected with code 1008 policy violation
+    const client2ClosePromise = new Promise<{ code: number; reason: string }>((resolve) => {
+      const ws2 = new WebSocket(`ws://127.0.0.1:${wsServer.getPort()}`);
+      clientSockets.push(ws2);
+      ws2.on("close", (code, reason) => {
+        resolve({ code, reason: reason.toString("utf-8") });
+      });
+      ws2.on("error", () => {});
+    });
+
+    const closeResult = await client2ClosePromise;
+    expect(closeResult.code).toBe(1008);
+    expect(closeResult.reason).toContain("Another client is already connected");
+
+    // 4. Established Client 1 connection and its in-flight command remain completely usable
+    expect(wsServer.isConnected()).toBe(true);
+    expect(dispatcher.isConnected()).toBe(true);
+    expect(dispatcher.getPendingCount()).toBe(1);
+
+    // Release in-flight command response from Client 1
+    respondToInFlight!();
+    const res1 = await p1;
+    expect(res1).toBe("from_ws1");
     expect(dispatcher.getPendingCount()).toBe(0);
+
+    // Send another command to Client 1 to verify continued health
+    const res2 = await dispatcher.send("second_cmd_on_ws1", {});
+    expect(res2).toBe("second_ok");
+    expect(dispatcher.getPendingCount()).toBe(0);
+
+    // 5. Normal closure of Client 1 allows a subsequent client to connect normally
+    await new Promise<void>((resolve) => {
+      ws1.once("close", () => resolve());
+      ws1.close();
+    });
+
+    if (wsServer.isConnected()) {
+      await new Promise<void>((resolve, reject) => {
+        if (!wsServer.isConnected()) {
+          return resolve();
+        }
+        const timer = setTimeout(() => reject(new Error("Timeout waiting for wsServer to register disconnect")), 3000);
+        const onConnChange = ({ connected }: { connected: boolean }) => {
+          if (!connected) {
+            clearTimeout(timer);
+            state.off("connection_change", onConnChange);
+            resolve();
+          }
+        };
+        state.on("connection_change", onConnChange);
+      });
+    }
+
+    const ws3 = await createClient();
+    expect(wsServer.isConnected()).toBe(true);
+    ws3.on("message", (data) => {
+      const req = JSON.parse(data.toString());
+      ws3.send(JSON.stringify({ id: req.id, success: true, result: "from_ws3" }));
+    });
+
+    const res3 = await dispatcher.send("cmd_on_ws3", {});
+    expect(res3).toBe("from_ws3");
+    expect(dispatcher.getPendingCount()).toBe(0);
+  });
+
+  it("STRESS-12: Enforces central MAX_PENDING_COMMANDS limit (128 accepted, 129th rejected)", async () => {
+    const ws = await createClient();
+    expect(wsServer.isConnected()).toBe(true);
+
+    const promises: Promise<any>[] = [];
+    try {
+      for (let i = 0; i < 128; i++) {
+        const p = dispatcher.send("hang_pending", { i }, 10000);
+        p.catch(() => {});
+        promises.push(p);
+      }
+      expect(dispatcher.getPendingCount()).toBe(128);
+
+      await expect(dispatcher.send("hang_pending", { i: 128 })).rejects.toMatchObject({
+        code: BridgeErrorCode.INVALID_PARAMS,
+        message: expect.stringContaining("Maximum pending bridge requests reached (128)"),
+      });
+
+      expect(dispatcher.getPendingCount()).toBe(128);
+    } finally {
+      ws.close();
+      await Promise.allSettled(promises);
+      expect(dispatcher.getPendingCount()).toBe(0);
+    }
+  });
+
+  it("STRESS-13: Rejects oversized outgoing request exceeding MAX_BRIDGE_PAYLOAD_BYTES with INVALID_PARAMS", async () => {
+    await createClient();
+    expect(wsServer.isConnected()).toBe(true);
+
+    const smallDispatcher = new CommandDispatcher({ maxPayloadBytes: 1024 });
+    const smallState = new BridgeState();
+    const smallServer = new BridgeWebSocketServer(smallDispatcher, smallState, {
+      host: "127.0.0.1",
+      port: 0,
+    });
+    await smallServer.start();
+
+    try {
+      const clientWs = new WebSocket(`ws://127.0.0.1:${smallServer.getPort()}`);
+      clientSockets.push(clientWs);
+      await new Promise<void>((resolve, reject) => {
+        clientWs.on("open", resolve);
+        clientWs.on("error", reject);
+      });
+
+      const oversizedPayload = "Z".repeat(2048);
+      await expect(smallDispatcher.send("too_large", { blob: oversizedPayload })).rejects.toMatchObject({
+        code: BridgeErrorCode.INVALID_PARAMS,
+        message: expect.stringContaining("Request payload exceeds maximum allowed size"),
+      });
+
+      expect(smallDispatcher.getPendingCount()).toBe(0);
+    } finally {
+      await smallServer.close();
+    }
+  });
+
+  it("STRESS-14: Disconnects client when incoming frame exceeds maxPayload", async () => {
+    const smallPayloadLimit = 1024;
+    const testDispatcher = new CommandDispatcher();
+    const testState = new BridgeState();
+    const testServer = new BridgeWebSocketServer(testDispatcher, testState, {
+      host: "127.0.0.1",
+      port: 0,
+      maxPayload: smallPayloadLimit,
+    });
+    await testServer.start();
+
+    try {
+      const ws = new WebSocket(`ws://127.0.0.1:${testServer.getPort()}`);
+      clientSockets.push(ws);
+      await new Promise<void>((resolve, reject) => {
+        ws.on("open", resolve);
+        ws.on("error", reject);
+      });
+
+      const closePromise = new Promise<{ code: number; reason: string }>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Timeout waiting for socket close on oversized frame")), 3000);
+        ws.on("close", (code, reason) => {
+          clearTimeout(timer);
+          resolve({ code, reason: reason.toString("utf-8") });
+        });
+        ws.on("error", () => {});
+      });
+
+      ws.send("A".repeat(2048));
+
+      const closeEvent = await closePromise;
+      expect(closeEvent.code).toBe(1009);
+    } finally {
+      await testServer.close();
+    }
   });
 
   it("ADV-2: Unsolicited 'error' event does not crash process without error listeners", async () => {

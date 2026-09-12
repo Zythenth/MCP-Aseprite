@@ -5,6 +5,7 @@ import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
 import { decodePngBase64Sync, encodeRgbaToPngBase64 } from "../../image/png.js";
 import { scaleNearestNeighbor } from "../../image/scaling.js";
+import { MAX_PIXELS_BATCH } from "../../config.js";
 
 export function registerEditingTools(
   server: McpServer,
@@ -22,7 +23,7 @@ export function registerEditingTools(
           y: z.number().int().describe("Y coordinate in canvas space (0-indexed)"),
           color: z.string().describe("Hex color e.g. #FF0000FF, #363636FF, or #00000000 for transparent"),
         })
-      ).min(1).describe("Batch of pixel coordinates and hex colors to paint"),
+      ).min(1).max(MAX_PIXELS_BATCH).describe("Batch of pixel coordinates and hex colors to paint"),
       layerName: z.string().optional().describe("Optional target layer name (defaults to active layer)"),
       layerIndex: z.number().int().min(0).optional().describe("Optional target layer index"),
       frameNumber: z.number().int().positive().optional().describe("Target frame number (1-indexed, defaults to active frame)"),
@@ -134,7 +135,7 @@ export function registerEditingTools(
           x: z.number().int(),
           y: z.number().int(),
         })
-      ).min(1).describe("List of (x, y) pixel coordinates to erase"),
+      ).min(1).max(MAX_PIXELS_BATCH).describe("List of (x, y) pixel coordinates to erase"),
       layerName: z.string().optional().describe("Optional target layer name"),
       layerIndex: z.number().int().min(0).optional().describe("Optional target layer index"),
       frameNumber: z.number().int().positive().optional().describe("Target frame number (1-indexed)"),

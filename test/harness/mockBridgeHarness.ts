@@ -17,6 +17,7 @@ import type {
   TestHarnessOptions,
 } from "./types.js";
 import { normalizeHex } from "./assertions.js";
+import { MAX_CANVAS_DIMENSION, MAX_PIXELS_BATCH } from "../../src/config.js";
 
 // Standard CRC32 implementation for pure-JS PNG generation
 function crc32(buf: Buffer): number {
@@ -111,6 +112,8 @@ class MockDocument {
   activeLayerIndex: number = 0;
   activeFrameNumber: number = 1;
   revision: number = 1;
+  filename: string = "sprite.aseprite";
+  existingFiles: Set<string> = new Set();
 
   layers: Array<{
     index: number;
@@ -154,11 +157,14 @@ class MockDocument {
 
   undoStack: UndoStep[] = [];
   redoStack: UndoStep[] = [];
-  revisionSnapshots: Map<number, string[][]> = new Map();
+  changeJournal: Array<{
+    revision: number;
+    pixelsChanged: number;
+    bounds: { x: number; y: number; width: number; height: number };
+  }> = [];
 
   constructor() {
     this.initCel(0, 1);
-    this.recordSnapshot();
   }
 
   private initCel(layerIdx: number, frameNum: number): string[][] {
@@ -177,12 +183,35 @@ class MockDocument {
     return this.initCel(layerIdx, frameNum);
   }
 
-  recordSnapshot(): void {
-    const composite = this.getCompositeMatrix();
-    this.revisionSnapshots.set(this.revision, composite);
+  getLayerMatrix(layerIndex: number, frameNumber: number): string[][] {
+    const result: string[][] = [];
+    for (let y = 0; y < this.height; y++) {
+      result.push(new Array(this.width).fill("#00000000"));
+    }
+    const cel = this.getCel(layerIndex, frameNumber);
+    const layer = this.layers.find((l) => l.index === layerIndex);
+    const opacityRatio = (layer?.opacity ?? 255) / 255;
+    for (let y = 0; y < this.height; y++) {
+      for (let x = 0; x < this.width; x++) {
+        const color = cel[y][x];
+        if (color !== "#00000000") {
+          if (opacityRatio === 1) {
+            result[y][x] = color;
+          } else {
+            const r = parseInt(color.slice(1, 3), 16) || 0;
+            const g = parseInt(color.slice(3, 5), 16) || 0;
+            const b = parseInt(color.slice(5, 7), 16) || 0;
+            const a = parseInt(color.slice(7, 9), 16) || 0;
+            const effA = Math.round(a * opacityRatio);
+            result[y][x] = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}${effA.toString(16).padStart(2, "0")}`.toUpperCase();
+          }
+        }
+      }
+    }
+    return result;
   }
 
-  getCompositeMatrix(): string[][] {
+  getCompositeMatrix(frameNumber: number = this.activeFrameNumber): string[][] {
     const result: string[][] = [];
     for (let y = 0; y < this.height; y++) {
       result.push(new Array(this.width).fill("#00000000"));
@@ -191,7 +220,7 @@ class MockDocument {
     // Blend visible layers bottom to top
     for (const layer of this.layers) {
       if (!layer.isVisible || layer.isGroup) continue;
-      const cel = this.getCel(layer.index, this.activeFrameNumber);
+      const cel = this.getCel(layer.index, frameNumber);
       for (let y = 0; y < this.height; y++) {
         for (let x = 0; x < this.width; x++) {
           const color = cel[y][x];
@@ -204,10 +233,10 @@ class MockDocument {
     return result;
   }
 
-  renderPngBuffer(scale: number = 1): Buffer {
+  renderPngBuffer(scale: number = 1, frameNumber: number = this.activeFrameNumber, targetLayer?: any): Buffer {
     const scaledW = this.width * scale;
     const scaledH = this.height * scale;
-    const composite = this.getCompositeMatrix();
+    const composite = targetLayer ? this.getLayerMatrix(targetLayer.index, frameNumber) : this.getCompositeMatrix(frameNumber);
     const rawRgba = new Uint8Array(scaledW * scaledH * 4);
 
     for (let y = 0; y < scaledH; y++) {
@@ -248,11 +277,94 @@ export class TestHarness {
 
   async setup(): Promise<void> {
     this.doc = new MockDocument();
+    this.doc.existingFiles.clear();
+    this.isConnected = true;
+  }
+
+  reset(): void {
+    this.doc = new MockDocument();
+    this.doc.existingFiles.clear();
     this.isConnected = true;
   }
 
   async teardown(): Promise<void> {
     this.isConnected = false;
+  }
+
+  setLayerLocked(layer: number | string, locked: boolean = true): void {
+    const target = this.doc.layers.find((l) => l.index === layer || l.name === layer);
+    if (!target) {
+      throw new Error(`Layer '${layer}' not found`);
+    }
+    target.isLocked = locked;
+  }
+
+  public resolveTargetLayer(args: Record<string, any>, forWriting = false): any {
+    let byIndex: any;
+    if (args.layerIndex !== undefined) {
+      const idx = args.layerIndex;
+      if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0 || idx >= this.doc.layers.length) {
+        throw { code: "INVALID_LAYER_INDEX", message: `Invalid layerIndex: ${idx}` };
+      }
+      byIndex = this.doc.layers.find((l) => l.index === idx);
+      if (!byIndex) {
+        throw { code: "LAYER_NOT_FOUND", message: `Layer with index ${idx} not found` };
+      }
+    }
+
+    let byName: any;
+    if (args.layerName !== undefined) {
+      const matched = this.doc.layers.filter((l) => l.name === args.layerName);
+      if (matched.length === 0) {
+        throw { code: "LAYER_NOT_FOUND", message: `Layer '${args.layerName}' not found` };
+      } else if (matched.length > 1) {
+        throw { code: "AMBIGUOUS_LAYER_NAME", message: `Ambiguous layerName '${args.layerName}': found multiple matching layers` };
+      }
+      byName = matched[0];
+    }
+
+    let targetLayer: any;
+    if (byIndex !== undefined && byName !== undefined) {
+      if (byIndex !== byName) {
+        throw { code: "CONFLICTING_SELECTORS", message: "Conflicting layer selectors: layerIndex and layerName refer to different layers" };
+      }
+      targetLayer = byIndex;
+    } else if (byIndex !== undefined) {
+      targetLayer = byIndex;
+    } else if (byName !== undefined) {
+      targetLayer = byName;
+    } else {
+      targetLayer = this.doc.layers[this.doc.activeLayerIndex] ?? this.doc.layers[0];
+    }
+
+    if (!targetLayer) {
+      throw { code: "LAYER_NOT_FOUND", message: "No target layer available" };
+    }
+
+    if (targetLayer.isGroup) {
+      throw { code: "INVALID_LAYER", message: "Cannot paint on or read from a group layer" };
+    }
+
+    if (forWriting) {
+      if (targetLayer.isLocked || targetLayer.isEditable === false) {
+        throw { code: "LAYER_LOCKED", message: "Cannot paint on locked or non-editable layer" };
+      }
+    }
+
+    return targetLayer;
+  }
+
+  public resolveTargetFrame(rawFrame: any): any {
+    if (rawFrame !== undefined) {
+      if (typeof rawFrame !== "number" || !Number.isInteger(rawFrame) || rawFrame < 1 || rawFrame > this.doc.frames.length) {
+        throw { code: "INVALID_FRAME", message: `Invalid frame: ${rawFrame}` };
+      }
+      const f = this.doc.frames.find((fr) => fr.frameNumber === rawFrame);
+      if (!f) throw { code: "INVALID_FRAME", message: `Invalid frame: ${rawFrame}` };
+      return f;
+    }
+    const current = this.doc.frames.find((fr) => fr.frameNumber === this.doc.activeFrameNumber);
+    return current ?? this.doc.frames[0];
   }
 
   async callTool(name: string, args: Record<string, any> = {}): Promise<ToolCallResult> {
@@ -324,9 +436,11 @@ export class TestHarness {
   // --- Primary Tools ---
 
   private async tool_aseprite_status(_args: any): Promise<ToolCallResult> {
-    const status: SpriteStatus = {
+    const status: any = {
       connected: this.isConnected,
-      file: null,
+      hasActiveSprite: true,
+      file: this.doc.filename || null,
+      filename: this.doc.filename || "",
       width: this.doc.width,
       height: this.doc.height,
       colorMode: this.doc.colorMode,
@@ -373,40 +487,97 @@ export class TestHarness {
   }
 
   private async tool_get_canvas(args: any): Promise<ToolCallResult> {
+    const targetFrame = this.resolveTargetFrame(args.frameIndex ?? args.frameNumber);
+    const frameNum = targetFrame.frameNumber;
+    let targetLayer: any = undefined;
+    if (args.layerName !== undefined) {
+      const matched = this.doc.layers.filter((l) => l.name === args.layerName);
+      if (matched.length === 0) {
+        throw { code: "LAYER_NOT_FOUND", message: `Layer '${args.layerName}' not found.` };
+      }
+      if (matched.length > 1) {
+        throw { code: "AMBIGUOUS_LAYER", message: `Ambiguous layerName '${args.layerName}': found multiple matching layers.` };
+      }
+      if (matched[0].isGroup) {
+        throw { code: "CANNOT_RENDER_GROUP", message: "Cannot render group layer." };
+      }
+      targetLayer = matched[0];
+    }
     const scale = args.scale ?? 1;
-    const pngBuf = this.doc.renderPngBuffer(scale);
+    const pngBuf = this.doc.renderPngBuffer(scale, frameNum, targetLayer);
     const base64 = pngBuf.toString("base64");
     return {
       content: [
         { type: "image", mimeType: "image/png", data: base64 },
-        { type: "text", text: JSON.stringify({ width: this.doc.width * scale, height: this.doc.height * scale, scale, revision: this.doc.revision }) },
+        { type: "text", text: JSON.stringify({ width: this.doc.width * scale, height: this.doc.height * scale, scale, frameNumber: frameNum, revision: this.doc.revision }) },
       ],
     };
   }
 
   private async tool_get_pixel_grid(args: any): Promise<ToolCallResult> {
     const format = args.format ?? "hex";
-    const composite = this.doc.getCompositeMatrix();
+    const targetLayer = this.resolveTargetLayer(args, false);
+    const targetFrame = this.resolveTargetFrame(args.frameIndex ?? args.frameNumber);
+    const cel = this.doc.getCel(targetLayer.index, targetFrame.frameNumber);
+    const isIndexed = this.doc.colorMode === "indexed";
 
-    let x0 = 0, y0 = 0, w = this.doc.width, h = this.doc.height;
-    if (args.bounds) {
-      x0 = Math.max(0, args.bounds.x);
-      y0 = Math.max(0, args.bounds.y);
-      w = Math.min(this.doc.width - x0, args.bounds.width);
-      h = Math.min(this.doc.height - y0, args.bounds.height);
+    const regionInput = args.region ?? args.bounds;
+    let rx = 0;
+    let ry = 0;
+    let rw = this.doc.width;
+    let rh = this.doc.height;
+
+    if (regionInput !== undefined) {
+      const { x, y, width, height } = regionInput;
+      if (typeof x !== "number" || !Number.isInteger(x) || x < 0 ||
+          typeof y !== "number" || !Number.isInteger(y) || y < 0) {
+        throw { code: "INVALID_ARGUMENT", message: "Region coordinates (x, y) must be non-negative integers." };
+      }
+      if (typeof width !== "number" || !Number.isInteger(width) || width <= 0 ||
+          typeof height !== "number" || !Number.isInteger(height) || height <= 0) {
+        throw { code: "INVALID_ARGUMENT", message: "Region dimensions (width, height) must be positive integers." };
+      }
+      if (x >= this.doc.width || y >= this.doc.height) {
+        throw { code: "OUT_OF_BOUNDS", message: "Region origin outside canvas bounds." };
+      }
+      rx = x;
+      ry = y;
+      rw = Math.min(width, this.doc.width - x);
+      rh = Math.min(height, this.doc.height - y);
     }
 
     const subMatrix: any[][] = [];
-    for (let y = y0; y < y0 + h; y++) {
+    const paletteList: string[] = [];
+    const paletteMap = new Map<string, number>();
+
+    for (let y = ry; y < ry + rh; y++) {
       const row: any[] = [];
-      for (let x = x0; x < x0 + w; x++) {
-        const hex = composite[y][x];
+      for (let x = rx; x < rx + rw; x++) {
+        const hex = cel[y][x];
         if (format === "rgba") {
           const r = parseInt(hex.slice(1, 3), 16) || 0;
           const g = parseInt(hex.slice(3, 5), 16) || 0;
           const b = parseInt(hex.slice(5, 7), 16) || 0;
           const a = parseInt(hex.slice(7, 9), 16) || 0;
           row.push({ r, g, b, a });
+        } else if (format === "indexed") {
+          if (isIndexed) {
+            const idx = this.doc.palette.indexOf(hex);
+            row.push(idx >= 0 ? idx : 0);
+          } else {
+            const r = parseInt(hex.slice(1, 3), 16) || 0;
+            const g = parseInt(hex.slice(3, 5), 16) || 0;
+            const b = parseInt(hex.slice(5, 7), 16) || 0;
+            const a = parseInt(hex.slice(7, 9), 16) || 0;
+            const rawVal = (((a & 0xff) << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff)) >>> 0;
+            row.push(rawVal);
+          }
+        } else if (format === "compact") {
+          if (!paletteMap.has(hex)) {
+            paletteList.push(hex);
+            paletteMap.set(hex, paletteList.length - 1);
+          }
+          row.push(paletteMap.get(hex)!);
         } else {
           row.push(hex);
         }
@@ -414,12 +585,21 @@ export class TestHarness {
       subMatrix.push(row);
     }
 
-    const result: PixelGridResult = {
-      width: w,
-      height: h,
+    const result: any = {
+      width: rw,
+      height: rh,
       format,
       pixels: subMatrix,
+      grid: subMatrix,
+      indexedSource: isIndexed,
     };
+    if (regionInput !== undefined) {
+      result.origin = { x: rx, y: ry };
+      result.region = { x: rx, y: ry, width: rw, height: rh };
+    }
+    if (format === "compact") {
+      result.palette = paletteList;
+    }
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 
@@ -439,14 +619,13 @@ export class TestHarness {
     if (!Array.isArray(pixels)) {
       throw { code: "INVALID_ARGUMENT", message: "pixels must be an array" };
     }
-
-    const activeLayer = this.doc.layers[this.doc.activeLayerIndex];
-    if (activeLayer?.isLocked) {
-      throw { code: "LAYER_LOCKED", message: "Cannot paint on locked layer" };
+    if (pixels.length > MAX_PIXELS_BATCH) {
+      throw { code: "BATCH_TOO_LARGE", message: `Pixel batch size exceeds maximum allowed (${MAX_PIXELS_BATCH})` };
     }
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    const cel = this.doc.getCel();
+    const targetLayer = this.resolveTargetLayer(args, true);
+    const targetFrame = this.resolveTargetFrame(args.frameNumber);
+    const cel = this.doc.getCel(targetLayer.index, targetFrame.frameNumber);
     const deltas: UndoStep["pixelDeltas"] = [];
 
     for (const p of pixels) {
@@ -461,18 +640,21 @@ export class TestHarness {
         deltas.push({
           x: p.x,
           y: p.y,
-          layerIndex: this.doc.activeLayerIndex,
-          frameNumber: this.doc.activeFrameNumber,
+          layerIndex: targetLayer.index,
+          frameNumber: targetFrame.frameNumber,
           oldColor: prevColor,
           newColor: normColor,
         });
         cel[p.y][p.x] = normColor;
       }
+    }
 
-      minX = Math.min(minX, p.x);
-      minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x);
-      maxY = Math.max(maxY, p.y);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const d of deltas) {
+      minX = Math.min(minX, d.x);
+      minY = Math.min(minY, d.y);
+      maxX = Math.max(maxX, d.x);
+      maxY = Math.max(maxY, d.y);
     }
 
     if (deltas.length > 0) {
@@ -483,16 +665,26 @@ export class TestHarness {
       });
       this.doc.redoStack = [];
       this.doc.revision++;
-      this.doc.recordSnapshot();
+
+      const bounds = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+      this.doc.changeJournal.push({
+        revision: this.doc.revision,
+        pixelsChanged: deltas.length,
+        bounds,
+      });
+      if (this.doc.changeJournal.length > 128) {
+        this.doc.changeJournal.shift();
+      }
     }
 
-    const bounds = pixels.length > 0
+    const bounds = deltas.length > 0
       ? { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 }
       : { x: 0, y: 0, width: 0, height: 0 };
 
     const resPayload: any = {
       success: true,
-      pixelsModified: pixels.length,
+      pixelsModified: deltas.length,
+      pixelsChanged: deltas.length,
       bounds,
       revision: this.doc.revision,
     };
@@ -507,13 +699,16 @@ export class TestHarness {
   }
 
   private async tool_set_pixel(args: any): Promise<ToolCallResult> {
-    return this.tool_set_pixels({ pixels: [{ x: args.x, y: args.y, color: args.color }], returnPreview: args.returnPreview });
+    return this.tool_set_pixels({ ...args, pixels: [{ x: args.x, y: args.y, color: args.color }] });
   }
 
   private async tool_erase_pixels(args: any): Promise<ToolCallResult> {
-    const coords = args.coordinates || [];
+    const coords = args.points || args.coordinates || [];
+    if (coords.length > MAX_PIXELS_BATCH) {
+      throw { code: "BATCH_TOO_LARGE", message: `Points batch size exceeds maximum allowed (${MAX_PIXELS_BATCH})` };
+    }
     const pixels = coords.map((c: any) => ({ x: c.x, y: c.y, color: "#00000000" }));
-    return this.tool_set_pixels({ pixels });
+    return this.tool_set_pixels({ ...args, pixels });
   }
 
   private async tool_undo(_args: any): Promise<ToolCallResult> {
@@ -535,7 +730,6 @@ export class TestHarness {
 
     this.doc.redoStack.push(tx);
     this.doc.revision++;
-    this.doc.recordSnapshot();
 
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, restoredRevision: tx.revisionBefore, revision: this.doc.revision }) }],
@@ -555,7 +749,6 @@ export class TestHarness {
 
     this.doc.undoStack.push(tx);
     this.doc.revision++;
-    this.doc.recordSnapshot();
 
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, replayedRevision: tx.revisionBefore, revision: this.doc.revision }) }],
@@ -599,7 +792,7 @@ export class TestHarness {
       }
     }
 
-    return this.tool_set_pixels({ pixels });
+    return this.tool_set_pixels({ ...args, pixels });
   }
 
   private async tool_draw_rectangle(args: any): Promise<ToolCallResult> {
@@ -622,7 +815,7 @@ export class TestHarness {
       }
     }
 
-    return this.tool_set_pixels({ pixels });
+    return this.tool_set_pixels({ ...args, pixels });
   }
 
   private async tool_draw_ellipse(args: any): Promise<ToolCallResult> {
@@ -657,41 +850,74 @@ export class TestHarness {
       }
     }
 
-    return this.tool_set_pixels({ pixels });
+    return this.tool_set_pixels({ ...args, pixels });
   }
 
   private async tool_flood_fill(args: any): Promise<ToolCallResult> {
     const { x, y, color, tolerance = 0, contiguous = true } = args;
-    if (x < 0 || x >= this.doc.width || y < 0 || y >= this.doc.height) {
+    if (typeof x !== "number" || typeof y !== "number" || x < 0 || x >= this.doc.width || y < 0 || y >= this.doc.height) {
       throw { code: "OUT_OF_BOUNDS", message: `Seed coordinate (${x}, ${y}) out of bounds` };
     }
 
-    const cel = this.doc.getCel();
+    const targetLayer = this.resolveTargetLayer(args, true);
+    const targetFrame = this.resolveTargetFrame(args.frameNumber);
+    const cel = this.doc.getCel(targetLayer.index, targetFrame.frameNumber);
     const seedColor = cel[y][x];
     const targetColor = normalizeHex(color);
 
     if (seedColor === targetColor && tolerance === 0) {
-      return { content: [{ type: "text", text: JSON.stringify({ success: true, pixelsChanged: 0, revision: this.doc.revision }) }] };
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            pixelsModified: 0,
+            pixelsChanged: 0,
+            bounds: { x: 0, y: 0, width: 0, height: 0 },
+            revision: this.doc.revision,
+          }),
+        }],
+      };
     }
 
+    const parseRgba = (hex: string) => {
+      const h = normalizeHex(hex);
+      return {
+        r: parseInt(h.slice(1, 3), 16) || 0,
+        g: parseInt(h.slice(3, 5), 16) || 0,
+        b: parseInt(h.slice(5, 7), 16) || 0,
+        a: parseInt(h.slice(7, 9), 16) || 0,
+      };
+    };
+
+    const seedRgba = parseRgba(seedColor);
     const toChange: Array<{ x: number; y: number }> = [];
 
-    if (!contiguous) {
-      for (let r = 0; r < this.doc.height; r++) {
-        for (let c = 0; c < this.doc.width; c++) {
-          if (cel[r][c] === seedColor) {
-            toChange.push({ x: c, y: r });
+    if (contiguous === false) {
+      for (let cy = 0; cy < this.doc.height; cy++) {
+        for (let cx = 0; cx < this.doc.width; cx++) {
+          const cRgba = parseRgba(cel[cy][cx]);
+          const diff = Math.abs(cRgba.r - seedRgba.r) + Math.abs(cRgba.g - seedRgba.g) + Math.abs(cRgba.b - seedRgba.b) + Math.abs(cRgba.a - seedRgba.a);
+          if (diff <= tolerance * 4) {
+            toChange.push({ x: cx, y: cy });
+            if (toChange.length > MAX_PIXELS_BATCH) {
+              throw { code: "BATCH_TOO_LARGE", message: `Pixel batch size exceeds maximum allowed (${MAX_PIXELS_BATCH})` };
+            }
           }
         }
       }
     } else {
       const queue: Array<[number, number]> = [[x, y]];
-      const visited = new Set<string>();
-      visited.add(`${x},${y}`);
+      let head = 0;
+      const visited = new Uint8Array(this.doc.width * this.doc.height);
+      visited[y * this.doc.width + x] = 1;
 
-      while (queue.length > 0) {
-        const [cx, cy] = queue.shift()!;
+      while (head < queue.length) {
+        const [cx, cy] = queue[head++];
         toChange.push({ x: cx, y: cy });
+        if (toChange.length > MAX_PIXELS_BATCH) {
+          throw { code: "BATCH_TOO_LARGE", message: `Pixel batch size exceeds maximum allowed (${MAX_PIXELS_BATCH})` };
+        }
 
         const neighbors: Array<[number, number]> = [
           [cx + 1, cy],
@@ -702,10 +928,14 @@ export class TestHarness {
 
         for (const [nx, ny] of neighbors) {
           if (nx >= 0 && nx < this.doc.width && ny >= 0 && ny < this.doc.height) {
-            const key = `${nx},${ny}`;
-            if (!visited.has(key) && cel[ny][nx] === seedColor) {
-              visited.add(key);
-              queue.push([nx, ny]);
+            const idx = ny * this.doc.width + nx;
+            if (!visited[idx]) {
+              visited[idx] = 1;
+              const cRgba = parseRgba(cel[ny][nx]);
+              const diff = Math.abs(cRgba.r - seedRgba.r) + Math.abs(cRgba.g - seedRgba.g) + Math.abs(cRgba.b - seedRgba.b) + Math.abs(cRgba.a - seedRgba.a);
+              if (diff <= tolerance * 4) {
+                queue.push([nx, ny]);
+              }
             }
           }
         }
@@ -713,56 +943,110 @@ export class TestHarness {
     }
 
     const pixels = toChange.map((p) => ({ x: p.x, y: p.y, color: targetColor }));
-    return this.tool_set_pixels({ pixels });
+    return this.tool_set_pixels({
+      ...args,
+      layerIndex: targetLayer.index,
+      frameNumber: targetFrame.frameNumber,
+      pixels,
+    });
   }
 
   private async tool_replace_color(args: any): Promise<ToolCallResult> {
-    const { fromColor, toColor } = args;
-    const normFrom = normalizeHex(fromColor);
+    const { fromColor, toColor, tolerance = 0 } = args;
+    const targetLayer = this.resolveTargetLayer(args, true);
+    const targetFrame = this.resolveTargetFrame(args.frameNumber);
+    const cel = this.doc.getCel(targetLayer.index, targetFrame.frameNumber);
+
+    const parseRgba = (hex: string) => {
+      const h = normalizeHex(hex);
+      return {
+        r: parseInt(h.slice(1, 3), 16) || 0,
+        g: parseInt(h.slice(3, 5), 16) || 0,
+        b: parseInt(h.slice(5, 7), 16) || 0,
+        a: parseInt(h.slice(7, 9), 16) || 0,
+      };
+    };
+
+    const fromRgba = parseRgba(fromColor);
     const normTo = normalizeHex(toColor);
-    const cel = this.doc.getCel();
 
     const pixels: Pixel[] = [];
     for (let y = 0; y < this.doc.height; y++) {
       for (let x = 0; x < this.doc.width; x++) {
-        if (cel[y][x] === normFrom) {
+        const cRgba = parseRgba(cel[y][x]);
+        const diff = Math.abs(cRgba.r - fromRgba.r) + Math.abs(cRgba.g - fromRgba.g) + Math.abs(cRgba.b - fromRgba.b) + Math.abs(cRgba.a - fromRgba.a);
+        if (diff <= tolerance * 4) {
           pixels.push({ x, y, color: normTo });
+          if (pixels.length > MAX_PIXELS_BATCH) {
+            throw { code: "BATCH_TOO_LARGE", message: `Pixel batch size exceeds maximum allowed (${MAX_PIXELS_BATCH})` };
+          }
         }
       }
     }
 
     if (pixels.length === 0) {
-      return { content: [{ type: "text", text: JSON.stringify({ success: true, pixelsChanged: 0, revision: this.doc.revision }) }] };
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            pixelsModified: 0,
+            pixelsChanged: 0,
+            bounds: { x: 0, y: 0, width: 0, height: 0 },
+            revision: this.doc.revision,
+          }),
+        }],
+      };
     }
 
-    return this.tool_set_pixels({ pixels });
+    return this.tool_set_pixels({
+      ...args,
+      layerIndex: targetLayer.index,
+      frameNumber: targetFrame.frameNumber,
+      pixels,
+    });
   }
 
   private async tool_get_changes_since(args: any): Promise<ToolCallResult> {
-    const { revision } = args;
-    if (revision === this.doc.revision) {
-      return { content: [{ type: "text", text: JSON.stringify({ changed: false, currentRevision: this.doc.revision }) }] };
+    const since = args.sinceRevision;
+    if (typeof since !== "number" || !Number.isInteger(since) || since < 0) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ changed: true, sinceRevision: since, currentRevision: this.doc.revision, fullRefreshRequired: true }) }],
+      };
     }
 
-    const baseSnapshot = this.doc.revisionSnapshots.get(revision);
-    if (!baseSnapshot) {
-      return { content: [{ type: "text", text: JSON.stringify({ changed: true, fullRefreshRequired: true, currentRevision: this.doc.revision }) }] };
+    if (since === this.doc.revision) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ changed: false, sinceRevision: since, currentRevision: this.doc.revision, pixelsChanged: 0, bounds: null }) }],
+      };
     }
 
-    const currentComposite = this.doc.getCompositeMatrix();
+    if (since > this.doc.revision || (this.doc.revision - since) > 128) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ changed: true, sinceRevision: since, currentRevision: this.doc.revision, fullRefreshRequired: true }) }],
+      };
+    }
+
+    const journalMap = new Map<number, { revision: number; pixelsChanged: number; bounds: { x: number; y: number; width: number; height: number } }>();
+    for (const entry of this.doc.changeJournal) {
+      journalMap.set(entry.revision, entry);
+    }
+
+    let totalPixels = 0;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    let count = 0;
 
-    for (let y = 0; y < this.doc.height; y++) {
-      for (let x = 0; x < this.doc.width; x++) {
-        if (baseSnapshot[y][x] !== currentComposite[y][x]) {
-          count++;
-          minX = Math.min(minX, x);
-          minY = Math.min(minY, y);
-          maxX = Math.max(maxX, x);
-          maxY = Math.max(maxY, y);
-        }
+    for (let r = since + 1; r <= this.doc.revision; r++) {
+      const entry = journalMap.get(r);
+      if (!entry) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ changed: true, sinceRevision: since, currentRevision: this.doc.revision, fullRefreshRequired: true }) }],
+        };
       }
+      totalPixels += entry.pixelsChanged;
+      minX = Math.min(minX, entry.bounds.x);
+      minY = Math.min(minY, entry.bounds.y);
+      maxX = Math.max(maxX, entry.bounds.x + entry.bounds.width - 1);
+      maxY = Math.max(maxY, entry.bounds.y + entry.bounds.height - 1);
     }
 
     return {
@@ -771,10 +1055,15 @@ export class TestHarness {
           type: "text",
           text: JSON.stringify({
             changed: true,
-            baseRevision: revision,
+            sinceRevision: since,
             currentRevision: this.doc.revision,
-            pixelsChanged: count,
-            bounds: count > 0 ? { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 } : null,
+            pixelsChanged: totalPixels,
+            bounds: {
+              x: minX,
+              y: minY,
+              width: maxX - minX + 1,
+              height: maxY - minY + 1,
+            },
           }),
         },
       ],
@@ -808,13 +1097,66 @@ export class TestHarness {
   }
 
   private async tool_find_palette_color(args: any): Promise<ToolCallResult> {
-    const { color } = args;
+    const { color, findNearest = true } = args;
     const target = normalizeHex(color);
-    const idx = this.doc.palette.findIndex((c) => normalizeHex(c) === target);
-    if (idx !== -1) {
-      return { content: [{ type: "text", text: JSON.stringify({ found: true, index: idx, hex: target, distance: 0 }) }] };
+    const targetR = parseInt(target.slice(1, 3), 16) || 0;
+    const targetG = parseInt(target.slice(3, 5), 16) || 0;
+    const targetB = parseInt(target.slice(5, 7), 16) || 0;
+    const targetA = parseInt(target.slice(7, 9), 16) || 0;
+
+    let bestIdx = 0;
+    let minDiff = Infinity;
+
+    for (let i = 0; i < this.doc.palette.length; i++) {
+      const c = normalizeHex(this.doc.palette[i]);
+      const cr = parseInt(c.slice(1, 3), 16) || 0;
+      const cg = parseInt(c.slice(3, 5), 16) || 0;
+      const cb = parseInt(c.slice(5, 7), 16) || 0;
+      const ca = parseInt(c.slice(7, 9), 16) || 0;
+      const diff = Math.sqrt(
+        Math.pow(cr - targetR, 2) +
+        Math.pow(cg - targetG, 2) +
+        Math.pow(cb - targetB, 2) +
+        Math.pow(ca - targetA, 2)
+      );
+      if (diff < minDiff) {
+        minDiff = diff;
+        bestIdx = i;
+      }
+      if (diff === 0) break;
     }
-    return { content: [{ type: "text", text: JSON.stringify({ found: true, index: 0, hex: this.doc.palette[0], distance: 10 }) }] };
+
+    const isExact = minDiff === 0;
+    if (!isExact && findNearest === false) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              found: false,
+              exact: false,
+            }),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            found: true,
+            exact: isExact,
+            index: bestIdx,
+            hex: normalizeHex(this.doc.palette[bestIdx]),
+            distance: isExact ? 0 : minDiff,
+          }),
+        },
+      ],
+    };
   }
 
   // --- Layers Tools ---
@@ -826,17 +1168,32 @@ export class TestHarness {
   }
 
   private async tool_create_layer(args: any): Promise<ToolCallResult> {
+    let parentIndex: number | null = args.parentLayer ?? null;
+    if (args.parentGroup !== undefined && args.parentGroup !== null) {
+      const matched = this.doc.layers.filter((l) => l.name === args.parentGroup);
+      if (matched.length === 0) {
+        throw { code: "LAYER_NOT_FOUND", message: `Parent group '${args.parentGroup}' not found.` };
+      }
+      if (matched.length > 1) {
+        throw { code: "AMBIGUOUS_LAYER", message: `Ambiguous parentGroup '${args.parentGroup}': found multiple matching layers.` };
+      }
+      if (!matched[0].isGroup) {
+        throw { code: "NOT_A_GROUP", message: `Layer '${args.parentGroup}' is not a group.` };
+      }
+      parentIndex = matched[0].index;
+    }
+
     const name = args.name;
     const index = this.doc.layers.length;
     this.doc.layers.push({
       index,
       name,
-      isGroup: args.type === "group",
+      isGroup: false,
       isVisible: true,
       isLocked: false,
       opacity: args.opacity ?? 255,
       blendMode: "normal",
-      parentIndex: args.parentLayer ?? null,
+      parentIndex,
     });
     this.doc.activeLayerIndex = index;
     this.doc.revision++;
@@ -900,7 +1257,21 @@ export class TestHarness {
   }
 
   private async tool_create_group(args: any): Promise<ToolCallResult> {
-    return this.tool_create_layer({ name: args.name, type: "group", parentLayer: args.parentGroup });
+    const name = args.name;
+    const index = this.doc.layers.length;
+    this.doc.layers.push({
+      index,
+      name,
+      isGroup: true,
+      isVisible: true,
+      isLocked: false,
+      opacity: 255,
+      blendMode: "normal",
+      parentIndex: null,
+    });
+    this.doc.activeLayerIndex = index;
+    this.doc.revision++;
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, layerIndex: index, name, isGroup: true, revision: this.doc.revision }) }] };
   }
 
   // --- Frames Tools ---
@@ -928,11 +1299,56 @@ export class TestHarness {
   }
 
   private async tool_create_frame(args: any): Promise<ToolCallResult> {
-    const nextNum = this.doc.frames.length + 1;
-    this.doc.frames.push({ frameNumber: nextNum, durationMs: args.durationMs ?? 100 });
-    this.doc.activeFrameNumber = nextNum;
+    if (args.durationMs !== undefined) {
+      throw { code: "INVALID_ARGUMENT", message: "create_frame accepts 'duration', not 'durationMs'" };
+    }
+    if (args.afterFrame !== undefined && args.afterFrame !== null) {
+      if (typeof args.afterFrame !== "number" || !Number.isInteger(args.afterFrame) || args.afterFrame < 1 || args.afterFrame > this.doc.frames.length) {
+        throw { code: "FRAME_OUT_OF_RANGE", message: `Invalid afterFrame: ${args.afterFrame}` };
+      }
+    }
+    const targetPos = args.afterFrame ? args.afterFrame + 1 : this.doc.frames.length + 1;
+    const durMs = args.duration ?? 100;
+    const newFrame = { frameNumber: targetPos, durationMs: durMs };
+
+    if (targetPos <= this.doc.frames.length) {
+      this.doc.frames.splice(targetPos - 1, 0, newFrame);
+      for (let i = targetPos; i < this.doc.frames.length; i++) {
+        this.doc.frames[i].frameNumber = i + 1;
+      }
+      const updatedCels = new Map<string, string[][]>();
+      for (const [key, matrix] of this.doc.cels.entries()) {
+        const parts = key.split("_");
+        const lIdx = parts[0];
+        const fNum = parseInt(parts[1], 10);
+        if (fNum >= targetPos) {
+          updatedCels.set(`${lIdx}_${fNum + 1}`, matrix);
+        } else {
+          updatedCels.set(key, matrix);
+        }
+      }
+      this.doc.cels = updatedCels;
+    } else {
+      this.doc.frames.push(newFrame);
+    }
+
+    this.doc.activeFrameNumber = targetPos;
     this.doc.revision++;
-    return { content: [{ type: "text", text: JSON.stringify({ success: true, createdFrameNumber: nextNum, totalFrames: this.doc.frames.length, revision: this.doc.revision }) }] };
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            frameNumber: targetPos,
+            createdFrameNumber: targetPos,
+            totalFrames: this.doc.frames.length,
+            durationMs: durMs,
+            revision: this.doc.revision,
+          }),
+        },
+      ],
+    };
   }
 
   private async tool_duplicate_frame(args: any): Promise<ToolCallResult> {
@@ -985,25 +1401,42 @@ export class TestHarness {
   }
 
   private async tool_create_tag(args: any): Promise<ToolCallResult> {
-    if (args.fromFrame > args.toFrame) {
+    const from = args.fromFrame;
+    const to = args.toFrame;
+    if (typeof from !== "number" || !Number.isInteger(from) || from < 1 || from > this.doc.frames.length) {
+      throw { code: "FRAME_OUT_OF_RANGE", message: `Frame ${from} out of range` };
+    }
+    if (typeof to !== "number" || !Number.isInteger(to) || to < 1 || to > this.doc.frames.length) {
+      throw { code: "FRAME_OUT_OF_RANGE", message: `Frame ${to} out of range` };
+    }
+    if (from > to) {
       throw { code: "INVALID_TAG_RANGE", message: "fromFrame must be <= toFrame" };
     }
-    if (args.toFrame > this.doc.frames.length) {
-      throw { code: "FRAME_OUT_OF_RANGE", message: `Frame ${args.toFrame} out of range` };
-    }
+    const normalizedColor = args.color ? normalizeHex(args.color) : undefined;
     const tag = {
       name: args.name,
-      fromFrame: args.fromFrame,
-      toFrame: args.toFrame,
+      fromFrame: from,
+      toFrame: to,
+      from,
+      to,
       direction: args.direction ?? "forward",
-      color: args.color,
+      color: normalizedColor,
     };
     this.doc.tags.push(tag);
     return { content: [{ type: "text", text: JSON.stringify({ success: true, tag }) }] };
   }
 
   private async tool_list_tags(_args: any): Promise<ToolCallResult> {
-    return { content: [{ type: "text", text: JSON.stringify({ tags: this.doc.tags }) }] };
+    const tags = this.doc.tags.map((t) => ({
+      name: t.name,
+      from: t.fromFrame,
+      to: t.toFrame,
+      fromFrame: t.fromFrame,
+      toFrame: t.toFrame,
+      direction: t.direction,
+      color: t.color ? normalizeHex(t.color) : undefined,
+    }));
+    return { content: [{ type: "text", text: JSON.stringify({ tags }) }] };
   }
 
   // --- File & Canvas Tools ---
@@ -1011,8 +1444,8 @@ export class TestHarness {
   private async tool_new_sprite(args: any): Promise<ToolCallResult> {
     const width = args.width;
     const height = args.height;
-    if (width <= 0 || height <= 0 || width > 8192 || height > 8192) {
-      throw { code: "INVALID_DIMENSIONS", message: "Width and height must be between 1 and 8192" };
+    if (width <= 0 || height <= 0 || width > MAX_CANVAS_DIMENSION || height > MAX_CANVAS_DIMENSION) {
+      throw { code: "INVALID_DIMENSIONS", message: `Width and height must be between 1 and ${MAX_CANVAS_DIMENSION}` };
     }
 
     this.doc = new MockDocument();
@@ -1020,7 +1453,6 @@ export class TestHarness {
     this.doc.height = height;
     this.doc.colorMode = args.colorMode ?? "rgb";
     this.doc.revision = 1;
-    this.doc.recordSnapshot();
 
     return {
       content: [
@@ -1040,13 +1472,20 @@ export class TestHarness {
   }
 
   private async tool_open_sprite(args: any): Promise<ToolCallResult> {
+    const filePath = args.filePath ?? args.filepath;
+    if (!filePath || typeof filePath !== "string") {
+      throw { code: "INVALID_ARGUMENT", message: "filePath is required." };
+    }
+    this.doc.filename = filePath;
+    this.doc.existingFiles.add(filePath);
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify({
             success: true,
-            filepath: args.filepath,
+            filePath,
+            filepath: filePath,
             width: this.doc.width,
             height: this.doc.height,
             frames: this.doc.frames.length,
@@ -1057,14 +1496,26 @@ export class TestHarness {
     };
   }
 
-  private async tool_save_sprite(_args: any): Promise<ToolCallResult> {
+  private async tool_save_sprite(args: any): Promise<ToolCallResult> {
+    if (!args || !args.expectedFilePath || typeof args.expectedFilePath !== "string") {
+      throw { code: "INVALID_ARGUMENT", message: "expectedFilePath is required." };
+    }
+    const normExpected = args.expectedFilePath.replace(/\\/g, "/");
+    const normActual = (this.doc.filename || "").replace(/\\/g, "/");
+    if (normExpected !== normActual) {
+      throw {
+        code: "FILENAME_MISMATCH",
+        message: `Sprite filename mismatch: expected '${args.expectedFilePath}', but active sprite is '${this.doc.filename}'.`,
+      };
+    }
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify({
             success: true,
-            filepath: "sprite.aseprite",
+            filepath: this.doc.filename,
+            filePath: this.doc.filename,
             savedAt: new Date().toISOString(),
           }),
         },
@@ -1073,13 +1524,26 @@ export class TestHarness {
   }
 
   private async tool_save_sprite_as(args: any): Promise<ToolCallResult> {
+    const filePath = args.filePath ?? args.filepath;
+    if (!filePath || typeof filePath !== "string") {
+      throw { code: "INVALID_ARGUMENT", message: "filePath is required." };
+    }
+    if (args.overwrite !== true && this.doc.existingFiles.has(filePath)) {
+      throw {
+        code: "FILE_EXISTS",
+        message: `File already exists and overwrite is false: ${filePath}`,
+      };
+    }
+    this.doc.filename = filePath;
+    this.doc.existingFiles.add(filePath);
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify({
             success: true,
-            filepath: args.filepath,
+            filepath: filePath,
+            filePath,
             savedAt: new Date().toISOString(),
           }),
         },
@@ -1088,17 +1552,37 @@ export class TestHarness {
   }
 
   private async tool_export_png(args: any): Promise<ToolCallResult> {
+    const outputPath = args.outputPath ?? args.filepath;
+    if (!outputPath || typeof outputPath !== "string") {
+      throw { code: "INVALID_ARGUMENT", message: "outputPath is required." };
+    }
+    const frameNumber = args.frameNumber ?? this.doc.activeFrameNumber;
+    if (typeof frameNumber !== "number" || !Number.isInteger(frameNumber) || frameNumber < 1 || frameNumber > this.doc.frames.length) {
+      throw { code: "FRAME_OUT_OF_RANGE", message: `Invalid frame: ${frameNumber}` };
+    }
     const scale = args.scale ?? 1;
+    if (typeof scale !== "number" || !Number.isInteger(scale) || scale < 1 || scale > 32) {
+      throw { code: "INVALID_ARGUMENT", message: `Invalid scale: ${scale}. Must be an integer between 1 and 32.` };
+    }
+    if (args.overwrite !== true && this.doc.existingFiles.has(outputPath)) {
+      throw {
+        code: "FILE_EXISTS",
+        message: `File already exists and overwrite is false: ${outputPath}`,
+      };
+    }
+    this.doc.existingFiles.add(outputPath);
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify({
             success: true,
-            filepath: args.filepath,
+            outputPath,
+            filepath: outputPath,
+            frameNumber,
+            scale,
             width: this.doc.width * scale,
             height: this.doc.height * scale,
-            scale,
           }),
         },
       ],
@@ -1107,25 +1591,55 @@ export class TestHarness {
 
   private async tool_resize_canvas(args: any): Promise<ToolCallResult> {
     const { width, height } = args;
-    if (width <= 0 || height <= 0) {
-      throw { code: "INVALID_DIMENSIONS", message: "New canvas dimensions must be >= 1" };
+    if (typeof width !== "number" || !Number.isInteger(width) || width < 1 || width > 4096 ||
+        typeof height !== "number" || !Number.isInteger(height) || height < 1 || height > 4096) {
+      throw { code: "INVALID_DIMENSIONS", message: "Canvas dimensions must be integers between 1 and 4096" };
+    }
+    const validAnchors = new Set(["top_left", "center", "top_right", "bottom_left", "bottom_right"]);
+    const anchor = args.anchor ?? "top_left";
+    if (!validAnchors.has(anchor)) {
+      throw { code: "INVALID_ARGUMENT", message: `Invalid anchor: ${anchor}` };
     }
 
     const oldW = this.doc.width;
     const oldH = this.doc.height;
 
+    let x = 0;
+    let y = 0;
+    if (anchor === "top_left") {
+      x = 0;
+      y = 0;
+    } else if (anchor === "center") {
+      x = Math.floor((oldW - width) / 2);
+      y = Math.floor((oldH - height) / 2);
+    } else if (anchor === "top_right") {
+      x = oldW - width;
+      y = 0;
+    } else if (anchor === "bottom_left") {
+      x = 0;
+      y = oldH - height;
+    } else if (anchor === "bottom_right") {
+      x = oldW - width;
+      y = oldH - height;
+    }
+
+    const dx = -x;
+    const dy = -y;
+
     const prevDims = { width: oldW, height: oldH };
     this.doc.width = width;
     this.doc.height = height;
 
-    // Resize existing cels
+    // Resize existing cels with anchor shift and transparent blank exposed pixels
     for (const [key, matrix] of this.doc.cels.entries()) {
       const newMatrix: string[][] = [];
-      for (let y = 0; y < height; y++) {
+      for (let ny = 0; ny < height; ny++) {
         const row: string[] = [];
-        for (let x = 0; x < width; x++) {
-          if (y < oldH && x < oldW) {
-            row.push(matrix[y][x]);
+        for (let nx = 0; nx < width; nx++) {
+          const oldX = nx - dx;
+          const oldY = ny - dy;
+          if (oldY >= 0 && oldY < oldH && oldX >= 0 && oldX < oldW && matrix[oldY] && matrix[oldY][oldX] !== undefined) {
+            row.push(matrix[oldY][oldX]);
           } else {
             row.push("#00000000");
           }
@@ -1143,7 +1657,9 @@ export class TestHarness {
     });
 
     this.doc.revision++;
-    this.doc.recordSnapshot();
+
+    const ox = -x === 0 ? 0 : -x;
+    const oy = -y === 0 ? 0 : -y;
 
     return {
       content: [
@@ -1151,8 +1667,14 @@ export class TestHarness {
           type: "text",
           text: JSON.stringify({
             success: true,
+            previousWidth: oldW,
+            previousHeight: oldH,
+            width,
+            height,
             oldDimensions: { width: oldW, height: oldH },
             newDimensions: { width, height },
+            anchor,
+            contentOffset: { x: ox, y: oy },
             revision: this.doc.revision,
           }),
         },

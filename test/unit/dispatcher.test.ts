@@ -153,4 +153,56 @@ describe("CommandDispatcher Unit Tests", () => {
       dispatcher.handleIncomingMessage("");
     }).not.toThrow();
   });
+
+  it("should accept up to 128 pending commands and reject the 129th with INVALID_PARAMS without dangling timers or entries", async () => {
+    const mockSocket = {
+      readyState: WebSocket.OPEN,
+      send: vi.fn(),
+    } as unknown as WebSocket;
+    dispatcher.setActiveSocket(mockSocket);
+
+    const promises: Promise<any>[] = [];
+    const errors: any[] = [];
+    try {
+      for (let i = 0; i < 128; i++) {
+        const p = dispatcher.send("hang_cmd", { i });
+        p.catch((err) => errors.push(err));
+        promises.push(p);
+      }
+      expect(dispatcher.getPendingCount()).toBe(128);
+
+      await expect(dispatcher.send("overflow_cmd", {})).rejects.toMatchObject({
+        code: BridgeErrorCode.INVALID_PARAMS,
+        message: expect.stringContaining("Maximum pending bridge requests reached (128)"),
+      });
+
+      expect(dispatcher.getPendingCount()).toBe(128);
+    } finally {
+      dispatcher.clearActiveSocket("Test completion cleanup");
+      await Promise.allSettled(promises);
+      expect(errors).toHaveLength(128);
+      for (const err of errors) {
+        expect(err).toBeInstanceOf(BridgeError);
+        expect(err.code).toBe(BridgeErrorCode.DISCONNECTED);
+      }
+      expect(dispatcher.getPendingCount()).toBe(0);
+    }
+  });
+
+  it("should reject oversized outgoing request exceeding maxPayloadBytes immediately with INVALID_PARAMS", async () => {
+    const customDispatcher = new CommandDispatcher({ maxPayloadBytes: 256 });
+    const mockSocket = {
+      readyState: WebSocket.OPEN,
+      send: vi.fn(),
+    } as unknown as WebSocket;
+    customDispatcher.setActiveSocket(mockSocket);
+
+    const oversizedData = "X".repeat(300);
+    await expect(customDispatcher.send("large_cmd", { data: oversizedData })).rejects.toMatchObject({
+      code: BridgeErrorCode.INVALID_PARAMS,
+      message: expect.stringContaining("Request payload exceeds maximum allowed size"),
+    });
+
+    expect(customDispatcher.getPendingCount()).toBe(0);
+  });
 });

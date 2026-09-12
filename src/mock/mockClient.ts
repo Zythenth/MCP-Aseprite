@@ -8,6 +8,7 @@ export interface MockClientOptions {
   host?: string;
   port?: number;
   autoReconnect?: boolean;
+  token?: string;
 }
 
 export class MockClient {
@@ -16,6 +17,7 @@ export class MockClient {
   private host: string;
   private port: number;
   private autoReconnect: boolean;
+  private token?: string;
   private shouldRun = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private isConnectedState = false;
@@ -25,6 +27,7 @@ export class MockClient {
     this.host = options.host ?? "127.0.0.1";
     this.port = options.port ?? 32123;
     this.autoReconnect = options.autoReconnect ?? false;
+    this.token = options.token;
   }
 
   public isConnected(): boolean {
@@ -33,7 +36,10 @@ export class MockClient {
 
   public async connect(): Promise<void> {
     this.shouldRun = true;
-    const url = `ws://${this.host}:${this.port}`;
+    let url = `ws://${this.host}:${this.port}`;
+    if (this.token) {
+      url += `/?token=${encodeURIComponent(this.token)}`;
+    }
 
     return new Promise((resolve, reject) => {
       let resolved = false;
@@ -46,7 +52,7 @@ export class MockClient {
 
       this.ws.on("open", () => {
         this.isConnectedState = true;
-        logger.info(`[MockClient] Connected to ${url}`);
+        logger.info(`[MockClient] Connected to ${this.host}:${this.port}`);
         if (!resolved) {
           resolved = true;
           resolve();
@@ -65,7 +71,7 @@ export class MockClient {
 
         if (!resolved) {
           resolved = true;
-          reject(new Error(`Failed to connect to ${url}: connection closed with code ${code}`));
+          reject(new Error(`Failed to connect to ${this.host}:${this.port}: connection closed with code ${code}`));
         }
 
         if (this.shouldRun && this.autoReconnect) {

@@ -6,8 +6,10 @@
 
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { logger } from "../logger.js";
 import { DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT } from "./protocol.js";
+import { MAX_BRIDGE_PAYLOAD_BYTES } from "../config.js";
 import type { CommandDispatcher } from "./dispatcher.js";
 import type { BridgeState } from "./state.js";
 
@@ -15,6 +17,8 @@ export interface WsServerOptions {
   host?: string;
   port?: number;
   pingIntervalMs?: number;
+  maxPayload?: number;
+  token?: string;
 }
 
 interface AliveWebSocket extends WebSocket {
@@ -28,6 +32,8 @@ export class BridgeWebSocketServer {
   private readonly host: string;
   private readonly port: number;
   private readonly pingIntervalMs: number;
+  private readonly maxPayload: number;
+  private readonly token?: string;
   private readonly dispatcher: CommandDispatcher;
   private readonly state: BridgeState;
 
@@ -35,10 +41,10 @@ export class BridgeWebSocketServer {
     this.dispatcher = dispatcher;
     this.state = state;
     this.host = options.host || DEFAULT_BRIDGE_HOST;
-    this.port = options.port !== undefined
-      ? options.port
-      : (process.env.ASEPRITE_WS_PORT ? parseInt(process.env.ASEPRITE_WS_PORT, 10) : DEFAULT_BRIDGE_PORT);
+    this.port = options.port !== undefined ? options.port : DEFAULT_BRIDGE_PORT;
     this.pingIntervalMs = options.pingIntervalMs || 15000;
+    this.maxPayload = options.maxPayload !== undefined ? options.maxPayload : MAX_BRIDGE_PAYLOAD_BYTES;
+    this.token = options.token;
   }
 
   public async start(): Promise<void> {
@@ -47,12 +53,16 @@ export class BridgeWebSocketServer {
         this.wss = new WebSocketServer({
           host: this.host,
           port: this.port,
+          maxPayload: this.maxPayload,
         });
 
         this.wss.on("listening", () => {
           const addr = this.wss?.address();
           const actualPort = typeof addr === "object" && addr !== null ? addr.port : this.port;
           logger.info(`Bridge WebSocket server listening strictly on ${this.host}:${actualPort}`);
+          if (!this.token) {
+            logger.warn("Bridge WebSocket authentication is disabled on loopback");
+          }
           this.startHeartbeat();
           resolve();
         });
@@ -85,6 +95,34 @@ export class BridgeWebSocketServer {
   }
 
   private handleConnection(socket: AliveWebSocket, req: IncomingMessage): void {
+    // Validate token authentication if configured, before loopback, first-client pinning, state, or dispatcher
+    if (this.token) {
+      let authenticated = false;
+      let providedToken: string | null = null;
+      if (req.url) {
+        try {
+          const parsedUrl = new URL(req.url, `http://${this.host}`);
+          providedToken = parsedUrl.searchParams.get("token");
+        } catch {
+          // Malformed URL, providedToken remains null
+        }
+      }
+
+      if (providedToken) {
+        const expectedBuf = Buffer.from(this.token, "utf-8");
+        const providedBuf = Buffer.from(providedToken, "utf-8");
+        if (expectedBuf.length === providedBuf.length) {
+          authenticated = timingSafeEqual(expectedBuf, providedBuf);
+        }
+      }
+
+      if (!authenticated) {
+        logger.warn("Rejected unauthorized bridge connection: invalid authentication token");
+        socket.close(1008, "Invalid bridge authentication");
+        return;
+      }
+    }
+
     const remoteIp = req.socket.remoteAddress;
 
     // Strict loopback security validation
@@ -94,15 +132,19 @@ export class BridgeWebSocketServer {
       return;
     }
 
-    logger.info(`Bridge connection accepted from ${remoteIp}`);
-
-    // If an older connection exists, terminate it cleanly to adopt the new client
-    if (this.activeSocket && this.activeSocket !== socket) {
-      logger.warn("Existing bridge client connection replaced by new incoming client");
-      this.dispatcher.clearActiveSocket("Client replaced by new incoming connection");
-      this.activeSocket.terminate();
-      this.activeSocket = null;
+    // First-client pinning:
+    // while an active socket is OPEN or CONNECTING, reject/close the newcomer with policy code 1008
+    // without clearing the dispatcher, state, or in-flight requests for the established client.
+    if (
+      this.activeSocket &&
+      (this.activeSocket.readyState === WebSocket.OPEN || this.activeSocket.readyState === WebSocket.CONNECTING)
+    ) {
+      logger.warn(`Rejected incoming bridge connection from ${remoteIp}: active client already established`);
+      socket.close(1008, "Another client is already connected");
+      return;
     }
+
+    logger.info(`Bridge connection accepted from ${remoteIp}`);
 
     this.activeSocket = socket;
     socket.isAlive = true;
@@ -206,11 +248,16 @@ export async function startWsServer(
   port?: number,
   host?: string,
   dispatcher?: CommandDispatcher,
-  state?: BridgeState
+  state?: BridgeState,
+  optionsOrToken?: string | { token?: string; pingIntervalMs?: number; maxPayload?: number }
 ): Promise<BridgeWebSocketServer> {
   const activeDispatcher = dispatcher || new (await import("./dispatcher.js")).CommandDispatcher();
   const activeState = state || new (await import("./state.js")).BridgeState();
-  const server = new BridgeWebSocketServer(activeDispatcher, activeState, { port, host });
+  const extraOptions =
+    typeof optionsOrToken === "string"
+      ? { token: optionsOrToken }
+      : optionsOrToken || {};
+  const server = new BridgeWebSocketServer(activeDispatcher, activeState, { port, host, ...extraOptions });
   await server.start();
   return server;
 }

@@ -33,6 +33,7 @@ export async function startMockBridge(options: MockBridgeOptions = {}): Promise<
     host: options.host ?? "127.0.0.1",
     port: options.port ?? 32123,
     autoReconnect: options.autoReconnect ?? false,
+    token: options.token,
   });
 
   await client.connect();

@@ -16,6 +16,7 @@ import {
   type BridgeRequestMessage,
   type BridgeResponseMessage,
 } from "./protocol.js";
+import { MAX_BRIDGE_PAYLOAD_BYTES, MAX_PENDING_COMMANDS } from "../config.js";
 
 interface DeferredRequest<T> {
   id: string;
@@ -27,10 +28,23 @@ interface DeferredRequest<T> {
   timeoutMs: number;
 }
 
+export interface CommandDispatcherOptions {
+  maxPendingCommands?: number;
+  maxPayloadBytes?: number;
+}
+
 export class CommandDispatcher extends EventEmitter {
   private activeSocket: WebSocket | null = null;
   private pending = new Map<string, DeferredRequest<any>>();
   private counter: number = 0;
+  private readonly maxPendingCommands: number;
+  private readonly maxPayloadBytes: number;
+
+  constructor(options: CommandDispatcherOptions = {}) {
+    super();
+    this.maxPendingCommands = options.maxPendingCommands ?? MAX_PENDING_COMMANDS;
+    this.maxPayloadBytes = options.maxPayloadBytes ?? MAX_BRIDGE_PAYLOAD_BYTES;
+  }
 
   public setActiveSocket(socket: WebSocket | null): void {
     this.activeSocket = socket;
@@ -59,9 +73,26 @@ export class CommandDispatcher extends EventEmitter {
       );
     }
 
+    if (this.pending.size >= this.maxPendingCommands) {
+      throw new BridgeError(
+        `Maximum pending bridge requests reached (${this.maxPendingCommands})`,
+        BridgeErrorCode.INVALID_PARAMS,
+        { pendingCount: this.pending.size, maxPending: this.maxPendingCommands }
+      );
+    }
+
     const id = this.generateId();
     const requestMessage: BridgeRequestMessage = { id, command, params };
     const serialized = JSON.stringify(requestMessage);
+    const payloadBytes = Buffer.byteLength(serialized, "utf-8");
+
+    if (payloadBytes > this.maxPayloadBytes) {
+      throw new BridgeError(
+        `Request payload exceeds maximum allowed size (${payloadBytes} bytes > ${this.maxPayloadBytes} bytes)`,
+        BridgeErrorCode.INVALID_PARAMS,
+        { byteLength: payloadBytes, maxPayloadBytes: this.maxPayloadBytes }
+      );
+    }
 
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
