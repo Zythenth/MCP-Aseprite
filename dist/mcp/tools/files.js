@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateOpenPath, validateSaveAsPath, validateExportPngPath, } from "../../security/fileAccess.js";
 export function registerFileTools(server, dispatcher, stateTracker) {
     // 1. new_sprite
     server.tool("new_sprite", "Creates a new blank sprite document in Aseprite with specified dimensions and color mode.", {
@@ -39,7 +40,8 @@ export function registerFileTools(server, dispatcher, stateTracker) {
         filePath: z.string().describe("Absolute file path to open in Aseprite"),
     }, async (params) => {
         try {
-            const res = await dispatcher.send("open_sprite", params, 15000);
+            const canonicalPath = validateOpenPath(params.filePath);
+            const res = await dispatcher.send("open_sprite", { filePath: canonicalPath }, 15000);
             if (typeof res.revision === "number") {
                 stateTracker.setRevision(res.revision);
             }
@@ -57,7 +59,12 @@ export function registerFileTools(server, dispatcher, stateTracker) {
     // 3. save_sprite
     server.tool("save_sprite", "Explicitly saves the active sprite to disk. (Saves only when explicitly requested).", {}, async () => {
         try {
-            const res = await dispatcher.send("save_sprite", {}, 15000);
+            const status = await dispatcher.send("aseprite_status", {}, 5000);
+            if (!status || !status.filename || typeof status.filename !== "string" || status.filename.trim() === "") {
+                throw new Error("Cannot save sprite: active sprite has no filename (use save_sprite_as first).");
+            }
+            const canonicalPath = validateOpenPath(status.filename);
+            const res = await dispatcher.send("save_sprite", { expectedFilePath: canonicalPath }, 15000);
             return {
                 content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
             };
@@ -72,9 +79,11 @@ export function registerFileTools(server, dispatcher, stateTracker) {
     // 4. save_sprite_as
     server.tool("save_sprite_as", "Saves the active sprite to a specific target file path on disk.", {
         filePath: z.string().describe("Target file path (.aseprite, .ase, or .png)"),
+        overwrite: z.boolean().optional().default(false).describe("Whether to overwrite existing target file"),
     }, async (params) => {
         try {
-            const res = await dispatcher.send("save_sprite_as", params, 15000);
+            const canonicalPath = validateSaveAsPath(params.filePath, params.overwrite ?? false);
+            const res = await dispatcher.send("save_sprite_as", { filePath: canonicalPath, overwrite: params.overwrite ?? false }, 15000);
             return {
                 content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
             };
@@ -91,9 +100,15 @@ export function registerFileTools(server, dispatcher, stateTracker) {
         outputPath: z.string().describe("Target .png file path"),
         frameNumber: z.number().int().positive().optional().describe("Specific frame number to export"),
         scale: z.number().int().min(1).max(32).optional().default(1).describe("Nearest-neighbor export scale factor"),
+        overwrite: z.boolean().optional().default(false).describe("Whether to overwrite existing target file"),
     }, async (params) => {
         try {
-            const res = await dispatcher.send("export_png", params, 15000);
+            const canonicalPath = validateExportPngPath(params.outputPath, params.overwrite ?? false);
+            const res = await dispatcher.send("export_png", {
+                ...params,
+                outputPath: canonicalPath,
+                overwrite: params.overwrite ?? false,
+            }, 15000);
             return {
                 content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
             };

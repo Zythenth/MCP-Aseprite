@@ -3,6 +3,7 @@ export interface MockClientOptions {
     host?: string;
     port?: number;
     autoReconnect?: boolean;
+    token?: string;
 }
 export declare class MockClient {
     private engine;
@@ -10,6 +11,7 @@ export declare class MockClient {
     private host;
     private port;
     private autoReconnect;
+    private token?;
     private shouldRun;
     private reconnectTimer;
     private isConnectedState;

@@ -1,3 +1,4 @@
+import { getAllowedRoots } from "./security/fileAccess.js";
 export declare const DEFAULT_PORT = 32123;
 export declare const DEFAULT_WS_PORT = 32123;
 export declare const DEFAULT_HOST = "127.0.0.1";
@@ -15,19 +16,51 @@ export declare const RULER_LEFT_WIDTH_PX = 24;
 export declare const CHECKERBOARD_CELL_SIZE = 8;
 export declare const MAX_CANVAS_DIMENSION = 4096;
 export declare const MAX_PIXELS_BATCH = 100000;
+export declare const MAX_BRIDGE_PAYLOAD_BYTES: number;
+export declare const MAX_PENDING_COMMANDS = 128;
 export declare const COMPACT_PALETTE_CHARACTERS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 export declare const COMPACT_TRANSPARENT_CHAR = ".";
 export declare const SERVER_NAME = "aseprite-mcp";
 export declare const SERVER_VERSION = "0.1.0";
 export declare const MCP_PROTOCOL_VERSION = "2024-11-05";
+export declare const MIN_PORT = 1024;
+export declare const MAX_PORT = 65535;
+/**
+ * Minimum allowable command timeout in milliseconds (100 ms).
+ * Prevents zero/negative or impractically short timeouts.
+ */
+export declare const MIN_COMMAND_TIMEOUT_MS = 100;
+/**
+ * Maximum allowable command timeout in milliseconds (300,000 ms = 5 minutes).
+ * Accommodates heavy batch operations while preventing indefinite hangs.
+ */
+export declare const MAX_COMMAND_TIMEOUT_MS = 300000;
+/**
+ * Strictly parses a port from an environment string.
+ * Fails fast with an actionable Error if the input is explicitly provided but not a valid base-10 integer in 1024..65535.
+ * Falls back to defaultVal only when the input is absent (undefined) or blank (empty/whitespace-only).
+ */
+export declare function parsePort(val: string | undefined, defaultVal?: number): number;
+/**
+ * Strictly parses a duration in milliseconds from an environment string.
+ * Fails fast with an actionable Error if the input is explicitly provided but not a valid base-10 integer in MIN_COMMAND_TIMEOUT_MS..MAX_COMMAND_TIMEOUT_MS.
+ * Falls back to defaultVal only when the input is absent (undefined) or blank (empty/whitespace-only).
+ */
+export declare function parseCommandTimeout(val: string | undefined, defaultVal?: number): number;
+export declare const BRIDGE_TOKEN_REGEX: RegExp;
+export declare function parseBridgeToken(val: string | undefined): string | undefined;
+export declare function resolvePortEnv(): string | undefined;
 export declare const PORT: number;
 export declare const HOST: string;
 export declare const COMMAND_TIMEOUT_MS: number;
+export declare const ALLOWED_PATHS: string[];
+export declare const BRIDGE_TOKEN: string | undefined;
 export declare const config: {
     readonly port: number;
     readonly host: string;
     readonly commandTimeoutMs: number;
     readonly heavyCommandTimeoutMs: 15000;
+    readonly bridgeToken: string | undefined;
     readonly wsHeartbeatIntervalMs: 15000;
     readonly wsHeartbeatTimeoutMs: 30000;
     readonly defaultScale: 8;
@@ -40,10 +73,14 @@ export declare const config: {
     readonly checkerboardCellSize: 8;
     readonly maxCanvasDimension: 4096;
     readonly maxPixelsBatch: 100000;
+    readonly maxBridgePayloadBytes: number;
+    readonly maxPendingCommands: 128;
     readonly compactPaletteChars: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     readonly compactTransparentChar: ".";
+    readonly allowedPaths: string[];
     readonly serverName: "aseprite-mcp";
     readonly serverVersion: "0.1.0";
     readonly protocolVersion: "2024-11-05";
 };
+export { getAllowedRoots };
 //# sourceMappingURL=config.d.ts.map

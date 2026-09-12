@@ -1,3 +1,4 @@
+import { getAllowedRoots } from "./security/fileAccess.js";
 export const DEFAULT_PORT = 32123;
 export const DEFAULT_WS_PORT = DEFAULT_PORT;
 export const DEFAULT_HOST = "127.0.0.1";
@@ -15,17 +16,64 @@ export const RULER_LEFT_WIDTH_PX = 24;
 export const CHECKERBOARD_CELL_SIZE = 8;
 export const MAX_CANVAS_DIMENSION = 4096;
 export const MAX_PIXELS_BATCH = 100000;
+export const MAX_BRIDGE_PAYLOAD_BYTES = 16 * 1024 * 1024;
+export const MAX_PENDING_COMMANDS = 128;
 export const COMPACT_PALETTE_CHARACTERS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 export const COMPACT_TRANSPARENT_CHAR = ".";
 export const SERVER_NAME = "aseprite-mcp";
 export const SERVER_VERSION = "0.1.0";
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
-function parsePort(val, defaultVal) {
-    if (!val)
+export const MIN_PORT = 1024;
+export const MAX_PORT = 65535;
+/**
+ * Minimum allowable command timeout in milliseconds (100 ms).
+ * Prevents zero/negative or impractically short timeouts.
+ */
+export const MIN_COMMAND_TIMEOUT_MS = 100;
+/**
+ * Maximum allowable command timeout in milliseconds (300,000 ms = 5 minutes).
+ * Accommodates heavy batch operations while preventing indefinite hangs.
+ */
+export const MAX_COMMAND_TIMEOUT_MS = 300_000;
+/**
+ * Strictly parses a port from an environment string.
+ * Fails fast with an actionable Error if the input is explicitly provided but not a valid base-10 integer in 1024..65535.
+ * Falls back to defaultVal only when the input is absent (undefined) or blank (empty/whitespace-only).
+ */
+export function parsePort(val, defaultVal = DEFAULT_PORT) {
+    if (val === undefined)
         return defaultVal;
-    const parsed = parseInt(val, 10);
-    if (isNaN(parsed) || parsed < 1024 || parsed > 65535) {
+    const trimmed = val.trim();
+    if (trimmed === "")
         return defaultVal;
+    if (!/^[0-9]+$/.test(trimmed)) {
+        throw new Error(`Invalid port '${val}': must be a base-10 integer between ${MIN_PORT} and ${MAX_PORT}.`);
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isSafeInteger(parsed) || parsed < MIN_PORT || parsed > MAX_PORT) {
+        throw new Error(`Invalid port '${val}': must be an integer between ${MIN_PORT} and ${MAX_PORT} (got ${parsed}).`);
+    }
+    return parsed;
+}
+/**
+ * Strictly parses a duration in milliseconds from an environment string.
+ * Fails fast with an actionable Error if the input is explicitly provided but not a valid base-10 integer in MIN_COMMAND_TIMEOUT_MS..MAX_COMMAND_TIMEOUT_MS.
+ * Falls back to defaultVal only when the input is absent (undefined) or blank (empty/whitespace-only).
+ */
+export function parseCommandTimeout(val, defaultVal = DEFAULT_COMMAND_TIMEOUT_MS) {
+    if (val === undefined)
+        return defaultVal;
+    const trimmed = val.trim();
+    if (trimmed === "")
+        return defaultVal;
+    if (!/^[0-9]+$/.test(trimmed)) {
+        throw new Error(`Invalid ASEPRITE_COMMAND_TIMEOUT '${val}': must be a positive base-10 integer duration in milliseconds between ${MIN_COMMAND_TIMEOUT_MS} and ${MAX_COMMAND_TIMEOUT_MS}.`);
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isSafeInteger(parsed) ||
+        parsed < MIN_COMMAND_TIMEOUT_MS ||
+        parsed > MAX_COMMAND_TIMEOUT_MS) {
+        throw new Error(`Invalid ASEPRITE_COMMAND_TIMEOUT '${val}': duration must be between ${MIN_COMMAND_TIMEOUT_MS} and ${MAX_COMMAND_TIMEOUT_MS} ms (got ${parsed}).`);
     }
     return parsed;
 }
@@ -39,14 +87,43 @@ function sanitizeHost(val, defaultVal) {
     }
     return defaultVal;
 }
-export const PORT = parsePort(process.env.ASEPRITE_PORT || process.env.ASEPRITE_WS_PORT, DEFAULT_PORT);
+export const BRIDGE_TOKEN_REGEX = /^[A-Za-z0-9._~-]+$/;
+export function parseBridgeToken(val) {
+    if (val === undefined)
+        return undefined;
+    const trimmed = val.trim();
+    if (trimmed === "")
+        return undefined;
+    if (trimmed.length < 16 || trimmed.length > 128) {
+        throw new Error(`Invalid ASEPRITE_BRIDGE_TOKEN: length must be between 16 and 128 characters (got ${trimmed.length}).`);
+    }
+    if (!BRIDGE_TOKEN_REGEX.test(trimmed)) {
+        throw new Error("Invalid ASEPRITE_BRIDGE_TOKEN: token must contain only URL-safe characters [A-Za-z0-9._~-].");
+    }
+    return trimmed;
+}
+export function resolvePortEnv() {
+    const port = process.env.ASEPRITE_PORT;
+    if (port !== undefined && port.trim() !== "") {
+        return port;
+    }
+    const wsPort = process.env.ASEPRITE_WS_PORT;
+    if (wsPort !== undefined && wsPort.trim() !== "") {
+        return wsPort;
+    }
+    return port !== undefined ? port : wsPort;
+}
+export const PORT = parsePort(resolvePortEnv(), DEFAULT_PORT);
 export const HOST = sanitizeHost(process.env.ASEPRITE_HOST, DEFAULT_HOST);
-export const COMMAND_TIMEOUT_MS = parsePort(process.env.ASEPRITE_COMMAND_TIMEOUT, DEFAULT_COMMAND_TIMEOUT_MS);
+export const COMMAND_TIMEOUT_MS = parseCommandTimeout(process.env.ASEPRITE_COMMAND_TIMEOUT, DEFAULT_COMMAND_TIMEOUT_MS);
+export const ALLOWED_PATHS = getAllowedRoots();
+export const BRIDGE_TOKEN = parseBridgeToken(process.env.ASEPRITE_BRIDGE_TOKEN);
 export const config = {
     port: PORT,
     host: HOST,
     commandTimeoutMs: COMMAND_TIMEOUT_MS,
     heavyCommandTimeoutMs: HEAVY_COMMAND_TIMEOUT_MS,
+    bridgeToken: BRIDGE_TOKEN,
     wsHeartbeatIntervalMs: WS_HEARTBEAT_INTERVAL_MS,
     wsHeartbeatTimeoutMs: WS_HEARTBEAT_TIMEOUT_MS,
     defaultScale: DEFAULT_SCALE,
@@ -59,10 +136,14 @@ export const config = {
     checkerboardCellSize: CHECKERBOARD_CELL_SIZE,
     maxCanvasDimension: MAX_CANVAS_DIMENSION,
     maxPixelsBatch: MAX_PIXELS_BATCH,
+    maxBridgePayloadBytes: MAX_BRIDGE_PAYLOAD_BYTES,
+    maxPendingCommands: MAX_PENDING_COMMANDS,
     compactPaletteChars: COMPACT_PALETTE_CHARACTERS,
     compactTransparentChar: COMPACT_TRANSPARENT_CHAR,
+    allowedPaths: ALLOWED_PATHS,
     serverName: SERVER_NAME,
     serverVersion: SERVER_VERSION,
     protocolVersion: MCP_PROTOCOL_VERSION,
 };
+export { getAllowedRoots };
 //# sourceMappingURL=config.js.map

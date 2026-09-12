@@ -4,10 +4,17 @@
  */
 import { WebSocket } from "ws";
 import { EventEmitter } from "node:events";
+export interface CommandDispatcherOptions {
+    maxPendingCommands?: number;
+    maxPayloadBytes?: number;
+}
 export declare class CommandDispatcher extends EventEmitter {
     private activeSocket;
     private pending;
     private counter;
+    private readonly maxPendingCommands;
+    private readonly maxPayloadBytes;
+    constructor(options?: CommandDispatcherOptions);
     setActiveSocket(socket: WebSocket | null): void;
     isConnected(): boolean;
     generateId(): string;

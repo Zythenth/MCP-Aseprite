@@ -9,6 +9,8 @@ export interface WsServerOptions {
     host?: string;
     port?: number;
     pingIntervalMs?: number;
+    maxPayload?: number;
+    token?: string;
 }
 export declare class BridgeWebSocketServer {
     private wss;
@@ -17,6 +19,8 @@ export declare class BridgeWebSocketServer {
     private readonly host;
     private readonly port;
     private readonly pingIntervalMs;
+    private readonly maxPayload;
+    private readonly token?;
     private readonly dispatcher;
     private readonly state;
     constructor(dispatcher: CommandDispatcher, state: BridgeState, options?: WsServerOptions);
@@ -28,5 +32,9 @@ export declare class BridgeWebSocketServer {
     isConnected(): boolean;
     getPort(): number;
 }
-export declare function startWsServer(port?: number, host?: string, dispatcher?: CommandDispatcher, state?: BridgeState): Promise<BridgeWebSocketServer>;
+export declare function startWsServer(port?: number, host?: string, dispatcher?: CommandDispatcher, state?: BridgeState, optionsOrToken?: string | {
+    token?: string;
+    pingIntervalMs?: number;
+    maxPayload?: number;
+}): Promise<BridgeWebSocketServer>;
 //# sourceMappingURL=wsServer.d.ts.map

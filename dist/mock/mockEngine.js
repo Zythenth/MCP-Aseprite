@@ -1,5 +1,7 @@
 // src/mock/mockEngine.ts
 import { PNG } from "pngjs";
+import { MAX_PIXELS_BATCH } from "../config.js";
+export const MAX_CHANGE_JOURNAL_ENTRIES = 128;
 export function packRgba(r, g, b, a) {
     return (((a & 0xff) << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff)) >>> 0;
 }
@@ -63,12 +65,15 @@ export class MockAsepriteEngine {
     revision = 1;
     undoStack = [];
     redoStack = [];
+    changeJournal = [];
     palette = new Uint32Array(256);
     tags = [];
+    mockExistingFiles = new Set();
     constructor(width = 32, height = 32) {
         this.reset(width, height);
     }
     reset(width = 32, height = 32) {
+        this.mockExistingFiles = new Set();
         this.width = width;
         this.height = height;
         this.hasActiveSprite = true;
@@ -98,7 +103,7 @@ export class MockAsepriteEngine {
             },
         ];
         this.tags = [];
-        this.cels.clear();
+        this.cels = new Map();
         const initialCel = {
             layerIndex: 0,
             frameNumber: 1,
@@ -108,8 +113,9 @@ export class MockAsepriteEngine {
         this.cels.set("0:1", initialCel);
         this.undoStack = [];
         this.redoStack = [];
-        // Initialize basic palette
-        this.palette.fill(0);
+        this.changeJournal = [];
+        // Initialize fresh basic palette
+        this.palette = new Uint32Array(256);
         this.palette[0] = packRgba(0, 0, 0, 0); // transparent
         this.palette[1] = packRgba(0, 0, 0, 255); // black
         this.palette[2] = packRgba(255, 255, 255, 255); // white
@@ -186,15 +192,100 @@ export class MockAsepriteEngine {
         }
         return composite;
     }
-    exportFramePngBase64(frameNumber = this.activeFrameNumber) {
-        const composite = this.getCompositeBuffer(frameNumber);
+    exportFramePngBase64(frameNumber = this.activeFrameNumber, targetLayer) {
+        let buffer;
+        if (targetLayer) {
+            buffer = new Uint32Array(this.width * this.height);
+            const cel = this.cels.get(`${targetLayer.index}:${frameNumber}`);
+            if (cel) {
+                const layerAlphaRatio = targetLayer.opacity / 255;
+                for (let y = 0; y < this.height; y++) {
+                    for (let x = 0; x < this.width; x++) {
+                        const srcColor = this.getCelPixel(cel, x, y);
+                        if (srcColor === 0)
+                            continue;
+                        const src = unpackRgba(srcColor);
+                        const effectiveSrcAlpha = Math.round(src.a * layerAlphaRatio);
+                        buffer[y * this.width + x] = packRgba(src.r, src.g, src.b, effectiveSrcAlpha);
+                    }
+                }
+            }
+        }
+        else {
+            buffer = this.getCompositeBuffer(frameNumber);
+        }
         const png = new PNG({ width: this.width, height: this.height });
-        const byteView = new Uint8Array(composite.buffer, composite.byteOffset, composite.byteLength);
+        const byteView = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
         for (let i = 0; i < byteView.length; i++) {
             png.data[i] = byteView[i];
         }
         const pngBuffer = PNG.sync.write(png);
         return pngBuffer.toString("base64");
+    }
+    resolveTargetLayer(params, forWriting = false) {
+        let byIndex;
+        if (params.layerIndex !== undefined) {
+            const idx = params.layerIndex;
+            if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0 || idx >= this.layers.length) {
+                throw new Error(`Invalid layerIndex: ${idx}`);
+            }
+            byIndex = this.layers.find((l) => l.index === idx);
+            if (!byIndex) {
+                throw new Error(`Layer with index ${idx} not found.`);
+            }
+        }
+        let byName;
+        if (params.layerName !== undefined) {
+            const matched = this.layers.filter((l) => l.name === params.layerName);
+            if (matched.length === 0) {
+                throw new Error(`Layer '${params.layerName}' not found.`);
+            }
+            else if (matched.length > 1) {
+                throw new Error(`Ambiguous layerName '${params.layerName}': found multiple matching layers.`);
+            }
+            byName = matched[0];
+        }
+        let targetLayer;
+        if (byIndex !== undefined && byName !== undefined) {
+            if (byIndex !== byName) {
+                throw new Error("Conflicting layer selectors: layerIndex and layerName refer to different layers.");
+            }
+            targetLayer = byIndex;
+        }
+        else if (byIndex !== undefined) {
+            targetLayer = byIndex;
+        }
+        else if (byName !== undefined) {
+            targetLayer = byName;
+        }
+        else {
+            targetLayer = this.layers.find((l) => l.index === this.activeLayerIndex) ?? this.layers[0];
+        }
+        if (!targetLayer) {
+            throw new Error("No target layer available.");
+        }
+        if (targetLayer.isGroup) {
+            throw new Error("Cannot paint on or read from a group layer.");
+        }
+        if (forWriting) {
+            if (targetLayer.isLocked || targetLayer.isEditable === false) {
+                throw new Error("Cannot paint on locked or non-editable layer.");
+            }
+        }
+        return targetLayer;
+    }
+    resolveTargetFrame(rawFrame) {
+        if (rawFrame !== undefined) {
+            if (typeof rawFrame !== "number" || !Number.isInteger(rawFrame) || rawFrame < 1 || rawFrame > this.frames.length) {
+                throw new Error(`Invalid frame: ${rawFrame}`);
+            }
+            const f = this.frames.find((fr) => fr.frameNumber === rawFrame);
+            if (!f)
+                throw new Error(`Invalid frame: ${rawFrame}`);
+            return f;
+        }
+        const current = this.frames.find((fr) => fr.frameNumber === this.activeFrameNumber);
+        return current ?? this.frames[0];
     }
     getStatus() {
         const activeLayer = this.layers.find((l) => l.index === this.activeLayerIndex);
@@ -232,40 +323,77 @@ export class MockAsepriteEngine {
             case "get_canvas": {
                 if (!this.hasActiveSprite)
                     throw new Error("No active sprite open in Aseprite.");
-                const frameNum = params.frameIndex ?? this.activeFrameNumber;
+                const targetFrame = this.resolveTargetFrame(params.frameIndex ?? params.frameNumber);
+                const frameNum = targetFrame.frameNumber;
+                let targetLayer;
+                if (params.layerName !== undefined) {
+                    const matched = this.layers.filter((l) => l.name === params.layerName);
+                    if (matched.length === 0) {
+                        throw new Error(`Layer '${params.layerName}' not found.`);
+                    }
+                    if (matched.length > 1) {
+                        throw new Error(`Ambiguous layerName '${params.layerName}': found multiple matching layers.`);
+                    }
+                    if (matched[0].isGroup) {
+                        throw new Error("Cannot render group layer.");
+                    }
+                    targetLayer = matched[0];
+                }
                 return {
                     width: this.width,
                     height: this.height,
                     frameNumber: frameNum,
-                    pngBase64: this.exportFramePngBase64(frameNum),
+                    pngBase64: this.exportFramePngBase64(frameNum, targetLayer),
                     revision: this.revision,
                 };
             }
             case "get_pixel_grid": {
                 if (!this.hasActiveSprite)
                     throw new Error("No active sprite open in Aseprite.");
-                const frameNum = params.frameIndex ?? this.activeFrameNumber;
-                let layerIdx = params.layerIndex ?? this.activeLayerIndex;
-                if (params.layerName) {
-                    const l = this.layers.find((ly) => ly.name === params.layerName);
-                    if (!l)
-                        throw new Error(`Layer '${params.layerName}' not found.`);
-                    layerIdx = l.index;
+                const targetLayer = this.resolveTargetLayer(params, false);
+                const targetFrame = this.resolveTargetFrame(params.frameIndex ?? params.frameNumber);
+                const layerIdx = targetLayer.index;
+                const frameNum = targetFrame.frameNumber;
+                let rx = 0;
+                let ry = 0;
+                let rw = this.width;
+                let rh = this.height;
+                if (params.region !== undefined) {
+                    const { x, y, width, height } = params.region;
+                    if (typeof x !== "number" || !Number.isInteger(x) || x < 0 ||
+                        typeof y !== "number" || !Number.isInteger(y) || y < 0) {
+                        throw new Error("Region coordinates (x, y) must be non-negative integers.");
+                    }
+                    if (typeof width !== "number" || !Number.isInteger(width) || width <= 0 ||
+                        typeof height !== "number" || !Number.isInteger(height) || height <= 0) {
+                        throw new Error("Region dimensions (width, height) must be positive integers.");
+                    }
+                    if (x >= this.width || y >= this.height) {
+                        throw new Error("Region origin outside canvas bounds.");
+                    }
+                    rx = x;
+                    ry = y;
+                    rw = Math.min(width, this.width - x);
+                    rh = Math.min(height, this.height - y);
                 }
                 const cel = this.cels.get(`${layerIdx}:${frameNum}`);
                 const format = params.format ?? "hex";
+                const isIndexed = this.colorMode === "indexed";
                 const grid = [];
                 const paletteList = [];
                 const paletteMap = new Map();
-                for (let y = 0; y < this.height; y++) {
+                for (let y = ry; y < ry + rh; y++) {
                     const row = [];
-                    for (let x = 0; x < this.width; x++) {
+                    for (let x = rx; x < rx + rw; x++) {
                         const colorInt = cel ? this.getCelPixel(cel, x, y) : 0;
                         if (format === "hex") {
                             row.push(rgbaToHex(colorInt));
                         }
                         else if (format === "rgba") {
                             row.push(unpackRgba(colorInt));
+                        }
+                        else if (format === "indexed") {
+                            row.push(colorInt);
                         }
                         else if (format === "compact") {
                             const hex = rgbaToHex(colorInt);
@@ -279,12 +407,17 @@ export class MockAsepriteEngine {
                     grid.push(row);
                 }
                 const res = {
-                    width: this.width,
-                    height: this.height,
+                    width: rw,
+                    height: rh,
                     format,
                     grid,
+                    indexedSource: isIndexed,
                     revision: this.revision,
                 };
+                if (params.region !== undefined) {
+                    res.origin = { x: rx, y: ry };
+                    res.region = { x: rx, y: ry, width: rw, height: rh };
+                }
                 if (format === "compact")
                     res.palette = paletteList;
                 return res;
@@ -308,13 +441,13 @@ export class MockAsepriteEngine {
                 const pixels = params.pixels;
                 if (!pixels || pixels.length === 0)
                     throw new Error("No pixels provided.");
-                const layerIdx = params.layerIndex ?? this.activeLayerIndex;
-                const frameNum = params.frameNumber ?? this.activeFrameNumber;
-                const layer = this.layers.find((l) => l.index === layerIdx);
-                if (!layer || layer.isGroup)
-                    throw new Error("Cannot paint on invalid layer or group.");
-                if (layer.isLocked)
-                    throw new Error("Layer is locked.");
+                if (pixels.length > MAX_PIXELS_BATCH) {
+                    throw new Error(`Pixel batch size exceeds maximum allowed (${MAX_PIXELS_BATCH})`);
+                }
+                const targetLayer = this.resolveTargetLayer(params, true);
+                const targetFrame = this.resolveTargetFrame(params.frameNumber);
+                const layerIdx = targetLayer.index;
+                const frameNum = targetFrame.frameNumber;
                 const cel = this.getOrCreateCel(layerIdx, frameNum);
                 const deltas = [];
                 let minX = this.width, minY = this.height, maxX = 0, maxY = 0;
@@ -355,9 +488,23 @@ export class MockAsepriteEngine {
                         pixelDeltas: deltas,
                     });
                     this.redoStack = [];
+                    this.changeJournal.push({
+                        revision: this.revision,
+                        pixelsChanged: modifiedCount,
+                        bounds: {
+                            x: minX,
+                            y: minY,
+                            width: maxX - minX + 1,
+                            height: maxY - minY + 1,
+                        },
+                    });
+                    if (this.changeJournal.length > MAX_CHANGE_JOURNAL_ENTRIES) {
+                        this.changeJournal.shift();
+                    }
                 }
                 const out = {
                     pixelsModified: modifiedCount,
+                    pixelsChanged: modifiedCount,
                     bounds: modifiedCount > 0 ? {
                         x: minX,
                         y: minY,
@@ -378,6 +525,9 @@ export class MockAsepriteEngine {
                 });
             case "erase_pixels": {
                 const points = params.points ?? [];
+                if (points.length > MAX_PIXELS_BATCH) {
+                    throw new Error(`Points batch size exceeds maximum allowed (${MAX_PIXELS_BATCH})`);
+                }
                 return this.executeCommand("set_pixels", {
                     ...params,
                     pixels: points.map((pt) => ({ x: pt.x, y: pt.y, color: "#00000000" })),
@@ -503,46 +653,84 @@ export class MockAsepriteEngine {
             }
             case "flood_fill": {
                 const { x, y, color, tolerance = 0 } = params;
-                const cel = this.getOrCreateCel(params.layerIndex ?? this.activeLayerIndex, params.frameNumber ?? this.activeFrameNumber);
+                if (typeof x !== "number" || typeof y !== "number" || x < 0 || x >= this.width || y < 0 || y >= this.height) {
+                    throw new Error(`Seed coordinate (${x}, ${y}) out of bounds`);
+                }
+                const targetLayer = this.resolveTargetLayer(params, true);
+                const targetFrame = this.resolveTargetFrame(params.frameNumber);
+                const cel = this.getOrCreateCel(targetLayer.index, targetFrame.frameNumber);
                 const targetColor = this.getCelPixel(cel, x, y);
                 const newColor = hexToRgba(color);
-                if (targetColor === newColor)
-                    return { pixelsModified: 0, revision: this.revision };
+                if (targetColor === newColor && tolerance === 0) {
+                    return {
+                        pixelsModified: 0,
+                        pixelsChanged: 0,
+                        bounds: { x: 0, y: 0, width: 0, height: 0 },
+                        revision: this.revision,
+                    };
+                }
                 const targetUnpacked = unpackRgba(targetColor);
-                const visited = new Uint8Array(this.width * this.height);
-                const queue = [[x, y]];
-                visited[y * this.width + x] = 1;
                 const pixelsToPaint = [];
-                while (queue.length > 0) {
-                    const [cx, cy] = queue.shift();
-                    pixelsToPaint.push({ x: cx, y: cy, color });
-                    const neighbors = [
-                        [cx + 1, cy],
-                        [cx - 1, cy],
-                        [cx, cy + 1],
-                        [cx, cy - 1],
-                    ];
-                    for (const [nx, ny] of neighbors) {
-                        if (nx >= 0 && nx < this.width && ny >= 0 && ny < this.height) {
-                            const idx = ny * this.width + nx;
-                            if (!visited[idx]) {
-                                visited[idx] = 1;
-                                const c = unpackRgba(this.getCelPixel(cel, nx, ny));
-                                const diff = Math.abs(c.r - targetUnpacked.r) + Math.abs(c.g - targetUnpacked.g) + Math.abs(c.b - targetUnpacked.b) + Math.abs(c.a - targetUnpacked.a);
-                                if (diff <= tolerance * 4) {
-                                    queue.push([nx, ny]);
+                if (params.contiguous === false) {
+                    for (let cy = 0; cy < this.height; cy++) {
+                        for (let cx = 0; cx < this.width; cx++) {
+                            const c = unpackRgba(this.getCelPixel(cel, cx, cy));
+                            const diff = Math.abs(c.r - targetUnpacked.r) + Math.abs(c.g - targetUnpacked.g) + Math.abs(c.b - targetUnpacked.b) + Math.abs(c.a - targetUnpacked.a);
+                            if (diff <= tolerance * 4) {
+                                pixelsToPaint.push({ x: cx, y: cy, color });
+                                if (pixelsToPaint.length > MAX_PIXELS_BATCH) {
+                                    throw new Error(`Flood fill candidate count exceeds MAX_PIXELS_BATCH (${MAX_PIXELS_BATCH})`);
                                 }
                             }
                         }
                     }
                 }
-                return this.executeCommand("set_pixels", { ...params, pixels: pixelsToPaint });
+                else {
+                    const visited = new Uint8Array(this.width * this.height);
+                    const queue = [[x, y]];
+                    let head = 0;
+                    visited[y * this.width + x] = 1;
+                    while (head < queue.length) {
+                        const [cx, cy] = queue[head++];
+                        pixelsToPaint.push({ x: cx, y: cy, color });
+                        if (pixelsToPaint.length > MAX_PIXELS_BATCH) {
+                            throw new Error(`Flood fill candidate count exceeds MAX_PIXELS_BATCH (${MAX_PIXELS_BATCH})`);
+                        }
+                        const neighbors = [
+                            [cx + 1, cy],
+                            [cx - 1, cy],
+                            [cx, cy + 1],
+                            [cx, cy - 1],
+                        ];
+                        for (const [nx, ny] of neighbors) {
+                            if (nx >= 0 && nx < this.width && ny >= 0 && ny < this.height) {
+                                const idx = ny * this.width + nx;
+                                if (!visited[idx]) {
+                                    visited[idx] = 1;
+                                    const c = unpackRgba(this.getCelPixel(cel, nx, ny));
+                                    const diff = Math.abs(c.r - targetUnpacked.r) + Math.abs(c.g - targetUnpacked.g) + Math.abs(c.b - targetUnpacked.b) + Math.abs(c.a - targetUnpacked.a);
+                                    if (diff <= tolerance * 4) {
+                                        queue.push([nx, ny]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return this.executeCommand("set_pixels", {
+                    ...params,
+                    layerIndex: targetLayer.index,
+                    frameNumber: targetFrame.frameNumber,
+                    pixels: pixelsToPaint,
+                });
             }
             case "replace_color": {
                 const { fromColor, toColor, tolerance = 0 } = params;
+                const targetLayer = this.resolveTargetLayer(params, true);
+                const targetFrame = this.resolveTargetFrame(params.frameNumber);
+                const cel = this.getOrCreateCel(targetLayer.index, targetFrame.frameNumber);
                 const fromInt = hexToRgba(fromColor);
                 const fromUnpacked = unpackRgba(fromInt);
-                const cel = this.getOrCreateCel(params.layerIndex ?? this.activeLayerIndex, params.frameNumber ?? this.activeFrameNumber);
                 const pixelsToPaint = [];
                 for (let y = 0; y < this.height; y++) {
                     for (let x = 0; x < this.width; x++) {
@@ -551,39 +739,87 @@ export class MockAsepriteEngine {
                         const diff = Math.abs(c.r - fromUnpacked.r) + Math.abs(c.g - fromUnpacked.g) + Math.abs(c.b - fromUnpacked.b) + Math.abs(c.a - fromUnpacked.a);
                         if (diff <= tolerance * 4) {
                             pixelsToPaint.push({ x, y, color: toColor });
+                            if (pixelsToPaint.length > MAX_PIXELS_BATCH) {
+                                throw new Error(`Replace color candidate count exceeds MAX_PIXELS_BATCH (${MAX_PIXELS_BATCH})`);
+                            }
                         }
                     }
                 }
-                return this.executeCommand("set_pixels", { ...params, pixels: pixelsToPaint });
+                if (pixelsToPaint.length === 0) {
+                    return {
+                        pixelsModified: 0,
+                        pixelsChanged: 0,
+                        bounds: { x: 0, y: 0, width: 0, height: 0 },
+                        revision: this.revision,
+                    };
+                }
+                return this.executeCommand("set_pixels", {
+                    ...params,
+                    layerIndex: targetLayer.index,
+                    frameNumber: targetFrame.frameNumber,
+                    pixels: pixelsToPaint,
+                });
             }
             case "get_changes_since": {
-                const since = params.sinceRevision ?? 0;
-                const matchingTxs = this.undoStack.filter((t) => t.revisionAfter > since);
-                const deltas = [];
-                let minX = this.width, minY = this.height, maxX = 0, maxY = 0;
-                for (const tx of matchingTxs) {
-                    for (const d of tx.pixelDeltas) {
-                        deltas.push(d);
-                        if (d.x < minX)
-                            minX = d.x;
-                        if (d.y < minY)
-                            minY = d.y;
-                        if (d.x > maxX)
-                            maxX = d.x;
-                        if (d.y > maxY)
-                            maxY = d.y;
+                const since = params.sinceRevision;
+                if (typeof since !== "number" || !Number.isInteger(since) || since < 0) {
+                    return {
+                        changed: true,
+                        sinceRevision: since,
+                        currentRevision: this.revision,
+                        fullRefreshRequired: true,
+                    };
+                }
+                if (since === this.revision) {
+                    return {
+                        changed: false,
+                        sinceRevision: since,
+                        currentRevision: this.revision,
+                        pixelsChanged: 0,
+                        bounds: null,
+                    };
+                }
+                if (since > this.revision || (this.revision - since) > MAX_CHANGE_JOURNAL_ENTRIES) {
+                    return {
+                        changed: true,
+                        sinceRevision: since,
+                        currentRevision: this.revision,
+                        fullRefreshRequired: true,
+                    };
+                }
+                const journalMap = new Map();
+                for (const entry of this.changeJournal) {
+                    journalMap.set(entry.revision, entry);
+                }
+                let totalPixels = 0;
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                for (let r = since + 1; r <= this.revision; r++) {
+                    const entry = journalMap.get(r);
+                    if (!entry) {
+                        return {
+                            changed: true,
+                            sinceRevision: since,
+                            currentRevision: this.revision,
+                            fullRefreshRequired: true,
+                        };
                     }
+                    totalPixels += entry.pixelsChanged;
+                    minX = Math.min(minX, entry.bounds.x);
+                    minY = Math.min(minY, entry.bounds.y);
+                    maxX = Math.max(maxX, entry.bounds.x + entry.bounds.width - 1);
+                    maxY = Math.max(maxY, entry.bounds.y + entry.bounds.height - 1);
                 }
                 return {
+                    changed: true,
                     sinceRevision: since,
                     currentRevision: this.revision,
-                    modifiedPixels: deltas.length,
-                    bounds: deltas.length > 0 ? {
+                    pixelsChanged: totalPixels,
+                    bounds: {
                         x: minX,
                         y: minY,
                         width: maxX - minX + 1,
                         height: maxY - minY + 1,
-                    } : { x: 0, y: 0, width: 0, height: 0 },
+                    },
                 };
             }
             // Palette tools
@@ -609,6 +845,7 @@ export class MockAsepriteEngine {
             }
             case "find_palette_color": {
                 const target = unpackRgba(hexToRgba(params.color));
+                const findNearest = params.findNearest !== false;
                 let bestIdx = 0;
                 let minDiff = Infinity;
                 for (let i = 0; i < this.palette.length; i++) {
@@ -621,18 +858,44 @@ export class MockAsepriteEngine {
                         minDiff = diff;
                         bestIdx = i;
                     }
+                    if (diff === 0)
+                        break;
+                }
+                const isExact = minDiff === 0;
+                if (!isExact && !findNearest) {
+                    return {
+                        success: true,
+                        found: false,
+                        exact: false,
+                    };
                 }
                 return {
+                    success: true,
+                    found: true,
                     index: bestIdx,
                     hex: rgbaToHex(this.palette[bestIdx]),
-                    exact: minDiff === 0,
-                    distance: minDiff,
+                    exact: isExact,
+                    distance: isExact ? 0 : minDiff,
                 };
             }
             // Layer tools
             case "list_layers":
                 return { layers: this.layers.map((l) => ({ ...l })) };
             case "create_layer": {
+                let parentIndex = null;
+                if (params.parentGroup !== undefined && params.parentGroup !== null) {
+                    const matched = this.layers.filter((l) => l.name === params.parentGroup);
+                    if (matched.length === 0) {
+                        throw new Error(`Parent group '${params.parentGroup}' not found.`);
+                    }
+                    if (matched.length > 1) {
+                        throw new Error(`Ambiguous parentGroup '${params.parentGroup}': found multiple matching layers.`);
+                    }
+                    if (!matched[0].isGroup) {
+                        throw new Error(`Layer '${params.parentGroup}' is not a group.`);
+                    }
+                    parentIndex = matched[0].index;
+                }
                 const newLayer = {
                     index: this.layers.length,
                     name: params.name ?? `Layer ${this.layers.length + 1}`,
@@ -643,11 +906,11 @@ export class MockAsepriteEngine {
                     blendMode: "normal",
                     isGroup: false,
                     isBackground: false,
-                    parentIndex: null,
+                    parentIndex,
                 };
                 this.layers.push(newLayer);
                 this.revision++;
-                return { success: true, layer: newLayer, revision: this.revision };
+                return { success: true, name: newLayer.name, layer: newLayer, revision: this.revision };
             }
             case "rename_layer": {
                 const layer = this.layers.find((l) => l.name === params.oldName);
@@ -725,11 +988,47 @@ export class MockAsepriteEngine {
                 return { success: true, activeFrame: f.frameNumber };
             }
             case "create_frame": {
-                const nextNum = this.frames.length + 1;
-                const dur = (params.duration ?? 100) / 1000;
-                this.frames.push({ frameNumber: nextNum, duration: dur });
+                if (params.durationMs !== undefined) {
+                    throw new Error("create_frame accepts 'duration', not 'durationMs'");
+                }
+                if (params.afterFrame !== undefined && params.afterFrame !== null) {
+                    if (typeof params.afterFrame !== "number" || !Number.isInteger(params.afterFrame) || params.afterFrame < 1 || params.afterFrame > this.frames.length) {
+                        throw new Error(`Invalid afterFrame: ${params.afterFrame}`);
+                    }
+                }
+                const targetPos = params.afterFrame ? params.afterFrame + 1 : this.frames.length + 1;
+                const durMs = params.duration ?? 100;
+                const dur = durMs / 1000;
+                const newFrame = { frameNumber: targetPos, duration: dur };
+                if (targetPos <= this.frames.length) {
+                    this.frames.splice(targetPos - 1, 0, newFrame);
+                    for (let i = targetPos; i < this.frames.length; i++) {
+                        this.frames[i].frameNumber = i + 1;
+                    }
+                    const updatedCels = new Map();
+                    for (const cel of this.cels.values()) {
+                        if (cel.frameNumber >= targetPos) {
+                            cel.frameNumber += 1;
+                        }
+                        updatedCels.set(`${cel.layerIndex}:${cel.frameNumber}`, cel);
+                    }
+                    this.cels = updatedCels;
+                }
+                else {
+                    this.frames.push(newFrame);
+                }
+                if (targetPos <= this.activeFrameNumber) {
+                    this.activeFrameNumber += 1;
+                }
                 this.revision++;
-                return { success: true, frameNumber: nextNum, durationMs: params.duration ?? 100, revision: this.revision };
+                return {
+                    success: true,
+                    frameNumber: targetPos,
+                    createdFrameNumber: targetPos,
+                    totalFrames: this.frames.length,
+                    durationMs: durMs,
+                    revision: this.revision,
+                };
             }
             case "duplicate_frame": {
                 const srcFrame = this.frames.find((fr) => fr.frameNumber === params.frameNumber);
@@ -769,57 +1068,156 @@ export class MockAsepriteEngine {
                 return { success: true, frameNumber: f.frameNumber, durationMs: params.durationMs, revision: this.revision };
             }
             case "create_tag": {
+                const from = params.fromFrame;
+                const to = params.toFrame;
+                if (typeof from !== "number" || !Number.isInteger(from) || from < 1 || from > this.frames.length) {
+                    throw new Error(`Frame ${from} out of range`);
+                }
+                if (typeof to !== "number" || !Number.isInteger(to) || to < 1 || to > this.frames.length) {
+                    throw new Error(`Frame ${to} out of range`);
+                }
+                if (from > to) {
+                    throw new Error("fromFrame must be <= toFrame");
+                }
+                const normalizedColor = params.color ? rgbaToHex(hexToRgba(params.color)) : undefined;
                 this.tags.push({
                     name: params.name,
-                    from: params.fromFrame,
-                    to: params.toFrame,
-                    color: params.color,
+                    from,
+                    to,
+                    color: normalizedColor,
                 });
                 this.revision++;
                 return { success: true, tag: params.name, revision: this.revision };
             }
             case "list_tags":
-                return { tags: [...this.tags] };
+                return {
+                    tags: this.tags.map((t) => ({
+                        ...t,
+                        fromFrame: t.from,
+                        toFrame: t.to,
+                    })),
+                };
             // File / Canvas tools
             case "open_sprite":
                 this.filename = params.filePath;
-                this.revision++;
+                this.mockExistingFiles.add(params.filePath);
+                this.revision = 1;
+                this.changeJournal = [];
                 return { success: true, filename: this.filename, revision: this.revision };
             case "save_sprite":
+                if (!params || !params.expectedFilePath || typeof params.expectedFilePath !== "string") {
+                    throw new Error("expectedFilePath is required.");
+                }
+                const normExpected = params.expectedFilePath.replace(/\\/g, "/");
+                const normActual = this.filename.replace(/\\/g, "/");
+                if (normExpected !== normActual) {
+                    throw new Error(`Sprite filename mismatch: expected '${params.expectedFilePath}', but active sprite is '${this.filename}'.`);
+                }
                 return { success: true, filename: this.filename, message: "Saved sprite successfully" };
             case "save_sprite_as":
+                if (!params || !params.filePath || typeof params.filePath !== "string") {
+                    throw new Error("filePath is required.");
+                }
+                if (params.overwrite !== true && this.mockExistingFiles.has(params.filePath)) {
+                    throw new Error(`File already exists and overwrite is false: ${params.filePath}`);
+                }
                 this.filename = params.filePath;
+                this.mockExistingFiles.add(params.filePath);
                 return { success: true, filename: this.filename, message: `Saved sprite as ${this.filename}` };
-            case "export_png":
+            case "export_png": {
+                if (!params.outputPath || typeof params.outputPath !== "string") {
+                    throw new Error("outputPath is required.");
+                }
+                let frameNumber = params.frameNumber ?? this.activeFrameNumber;
+                if (typeof frameNumber !== "number" || !Number.isInteger(frameNumber) || frameNumber < 1 || frameNumber > this.frames.length) {
+                    throw new Error(`Invalid frame: ${frameNumber}`);
+                }
+                const scale = params.scale ?? 1;
+                if (typeof scale !== "number" || !Number.isInteger(scale) || scale < 1 || scale > 32) {
+                    throw new Error(`Invalid scale: ${scale}. Must be an integer between 1 and 32.`);
+                }
+                if (params.overwrite !== true && this.mockExistingFiles.has(params.outputPath)) {
+                    throw new Error(`File already exists and overwrite is false: ${params.outputPath}`);
+                }
+                this.mockExistingFiles.add(params.outputPath);
                 return {
                     success: true,
                     outputPath: params.outputPath,
-                    width: this.width * (params.scale ?? 1),
-                    height: this.height * (params.scale ?? 1),
+                    frameNumber,
+                    scale,
+                    width: this.width * scale,
+                    height: this.height * scale,
                 };
+            }
             case "resize_canvas": {
+                const { width, height } = params;
+                if (typeof width !== "number" || !Number.isInteger(width) || width < 1 || width > 4096 ||
+                    typeof height !== "number" || !Number.isInteger(height) || height < 1 || height > 4096) {
+                    throw new Error("Canvas dimensions must be integers between 1 and 4096");
+                }
+                const validAnchors = new Set(["top_left", "center", "top_right", "bottom_left", "bottom_right"]);
+                const anchor = params.anchor ?? "top_left";
+                if (!validAnchors.has(anchor)) {
+                    throw new Error(`Invalid anchor: ${anchor}`);
+                }
                 const oldW = this.width;
                 const oldH = this.height;
-                this.width = params.width;
-                this.height = params.height;
-                // Resize all cels
+                let x = 0;
+                let y = 0;
+                if (anchor === "top_left") {
+                    x = 0;
+                    y = 0;
+                }
+                else if (anchor === "center") {
+                    x = Math.floor((oldW - width) / 2);
+                    y = Math.floor((oldH - height) / 2);
+                }
+                else if (anchor === "top_right") {
+                    x = oldW - width;
+                    y = 0;
+                }
+                else if (anchor === "bottom_left") {
+                    x = 0;
+                    y = oldH - height;
+                }
+                else if (anchor === "bottom_right") {
+                    x = oldW - width;
+                    y = oldH - height;
+                }
+                const dx = -x;
+                const dy = -y;
+                this.width = width;
+                this.height = height;
+                // Resize all cels with anchor shift and transparent blank exposed pixels
                 for (const cel of this.cels.values()) {
                     const newPixels = new Uint32Array(this.width * this.height);
-                    for (let y = 0; y < Math.min(oldH, this.height); y++) {
-                        for (let x = 0; x < Math.min(oldW, this.width); x++) {
-                            newPixels[y * this.width + x] = cel.pixels[y * oldW + x];
+                    for (let ny = 0; ny < this.height; ny++) {
+                        const oldY = ny - dy;
+                        if (oldY < 0 || oldY >= oldH)
+                            continue;
+                        for (let nx = 0; nx < this.width; nx++) {
+                            const oldX = nx - dx;
+                            if (oldX < 0 || oldX >= oldW)
+                                continue;
+                            newPixels[ny * this.width + nx] = cel.pixels[oldY * oldW + oldX];
                         }
                     }
                     cel.bounds = { x: 0, y: 0, width: this.width, height: this.height };
                     cel.pixels = newPixels;
                 }
                 this.revision++;
+                const ox = -x === 0 ? 0 : -x;
+                const oy = -y === 0 ? 0 : -y;
                 return {
                     success: true,
                     previousWidth: oldW,
                     previousHeight: oldH,
                     width: this.width,
                     height: this.height,
+                    oldDimensions: { width: oldW, height: oldH },
+                    newDimensions: { width: this.width, height: this.height },
+                    anchor,
+                    contentOffset: { x: ox, y: oy },
                     revision: this.revision,
                 };
             }

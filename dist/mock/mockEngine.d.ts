@@ -1,4 +1,15 @@
 import type { AsepriteStatusResult } from "../bridge/protocol.js";
+export declare const MAX_CHANGE_JOURNAL_ENTRIES = 128;
+export interface PixelJournalEntry {
+    revision: number;
+    pixelsChanged: number;
+    bounds: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    };
+}
 export interface MockCelBounds {
     x: number;
     y: number;
@@ -65,6 +76,7 @@ export declare class MockAsepriteEngine {
     revision: number;
     undoStack: MockTransaction[];
     redoStack: MockTransaction[];
+    changeJournal: PixelJournalEntry[];
     palette: Uint32Array;
     tags: Array<{
         name: string;
@@ -72,13 +84,16 @@ export declare class MockAsepriteEngine {
         to: number;
         color?: string;
     }>;
+    mockExistingFiles: Set<string>;
     constructor(width?: number, height?: number);
     reset(width?: number, height?: number): void;
     getOrCreateCel(layerIndex: number, frameNumber: number): MockCel;
     getCelPixel(cel: MockCel, canvasX: number, canvasY: number): number;
     setCelPixel(cel: MockCel, canvasX: number, canvasY: number, color: number): void;
     getCompositeBuffer(frameNumber?: number): Uint32Array;
-    exportFramePngBase64(frameNumber?: number): string;
+    exportFramePngBase64(frameNumber?: number, targetLayer?: MockLayer): string;
+    resolveTargetLayer(params: Record<string, any>, forWriting?: boolean): MockLayer;
+    resolveTargetFrame(rawFrame: any): MockFrame;
     getStatus(): AsepriteStatusResult;
     executeCommand(command: string, params: Record<string, any>): any;
 }

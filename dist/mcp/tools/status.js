@@ -1,4 +1,4 @@
-import { DEFAULT_WS_PORT } from "../../config.js";
+import { config } from "../../config.js";
 import { logger } from "../../logger.js";
 export function registerStatusTool(server, dispatcher, stateTracker) {
     server.tool("aseprite_status", "Returns connection status with Aseprite, open document details, dimensions, color mode, layers, frames, active layer/frame, and revision.", {}, async () => {
@@ -8,7 +8,7 @@ export function registerStatusTool(server, dispatcher, stateTracker) {
             const fallback = {
                 connected: false,
                 message: "Aseprite is not connected. Please ensure Aseprite is open and lua/aseprite-bridge.lua is running, or start the Mock Bridge for testing.",
-                port: DEFAULT_WS_PORT,
+                port: config.port,
                 hasActiveSprite: false,
                 revision: 0,
             };

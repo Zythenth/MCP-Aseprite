@@ -7,6 +7,7 @@ export class MockClient {
     host;
     port;
     autoReconnect;
+    token;
     shouldRun = false;
     reconnectTimer = null;
     isConnectedState = false;
@@ -15,13 +16,17 @@ export class MockClient {
         this.host = options.host ?? "127.0.0.1";
         this.port = options.port ?? 32123;
         this.autoReconnect = options.autoReconnect ?? false;
+        this.token = options.token;
     }
     isConnected() {
         return this.isConnectedState && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
     }
     async connect() {
         this.shouldRun = true;
-        const url = `ws://${this.host}:${this.port}`;
+        let url = `ws://${this.host}:${this.port}`;
+        if (this.token) {
+            url += `/?token=${encodeURIComponent(this.token)}`;
+        }
         return new Promise((resolve, reject) => {
             let resolved = false;
             try {
@@ -32,7 +37,7 @@ export class MockClient {
             }
             this.ws.on("open", () => {
                 this.isConnectedState = true;
-                logger.info(`[MockClient] Connected to ${url}`);
+                logger.info(`[MockClient] Connected to ${this.host}:${this.port}`);
                 if (!resolved) {
                     resolved = true;
                     resolve();
@@ -48,7 +53,7 @@ export class MockClient {
                 logger.debug(`[MockClient] Disconnected (code: ${code}, reason: ${reasonStr})`);
                 if (!resolved) {
                     resolved = true;
-                    reject(new Error(`Failed to connect to ${url}: connection closed with code ${code}`));
+                    reject(new Error(`Failed to connect to ${this.host}:${this.port}: connection closed with code ${code}`));
                 }
                 if (this.shouldRun && this.autoReconnect) {
                     this.reconnectTimer = setTimeout(() => {

@@ -6,10 +6,18 @@ import { WebSocket } from "ws";
 import { EventEmitter } from "node:events";
 import { logger } from "../logger.js";
 import { BridgeErrorCode, BridgeError, DEFAULT_COMMAND_TIMEOUT_MS, isBridgeResponseMessage, isBridgeEventMessage, } from "./protocol.js";
+import { MAX_BRIDGE_PAYLOAD_BYTES, MAX_PENDING_COMMANDS } from "../config.js";
 export class CommandDispatcher extends EventEmitter {
     activeSocket = null;
     pending = new Map();
     counter = 0;
+    maxPendingCommands;
+    maxPayloadBytes;
+    constructor(options = {}) {
+        super();
+        this.maxPendingCommands = options.maxPendingCommands ?? MAX_PENDING_COMMANDS;
+        this.maxPayloadBytes = options.maxPayloadBytes ?? MAX_BRIDGE_PAYLOAD_BYTES;
+    }
     setActiveSocket(socket) {
         this.activeSocket = socket;
     }
@@ -26,9 +34,16 @@ export class CommandDispatcher extends EventEmitter {
         if (!this.isConnected()) {
             throw new BridgeError("Aseprite is not connected via WebSocket bridge. Please start the bridge script in Aseprite.", BridgeErrorCode.DISCONNECTED);
         }
+        if (this.pending.size >= this.maxPendingCommands) {
+            throw new BridgeError(`Maximum pending bridge requests reached (${this.maxPendingCommands})`, BridgeErrorCode.INVALID_PARAMS, { pendingCount: this.pending.size, maxPending: this.maxPendingCommands });
+        }
         const id = this.generateId();
         const requestMessage = { id, command, params };
         const serialized = JSON.stringify(requestMessage);
+        const payloadBytes = Buffer.byteLength(serialized, "utf-8");
+        if (payloadBytes > this.maxPayloadBytes) {
+            throw new BridgeError(`Request payload exceeds maximum allowed size (${payloadBytes} bytes > ${this.maxPayloadBytes} bytes)`, BridgeErrorCode.INVALID_PARAMS, { byteLength: payloadBytes, maxPayloadBytes: this.maxPayloadBytes });
+        }
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pending.delete(id);

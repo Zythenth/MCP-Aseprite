@@ -24,6 +24,7 @@ async function main() {
     const wsServer = new BridgeWebSocketServer(dispatcher, state, {
         host: config.host,
         port: config.port,
+        token: config.bridgeToken,
     });
     await wsServer.start();
     logger.info(`WebSocket server active on ws://${config.host}:${config.port}`);
@@ -33,6 +34,7 @@ async function main() {
         await startMockBridge({
             host: config.host,
             port: config.port,
+            token: config.bridgeToken,
         });
         logger.info("Mock Bridge connected successfully.");
     }

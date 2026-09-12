@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { decodePngBase64Sync, encodeRgbaToPngBase64 } from "../../image/png.js";
 import { scaleNearestNeighbor } from "../../image/scaling.js";
+import { MAX_PIXELS_BATCH } from "../../config.js";
 export function registerEditingTools(server, dispatcher, stateTracker) {
     // 1. set_pixels (PRIMARY DRAWING TOOL)
     server.tool("set_pixels", "PRIMARY DRAWING TOOL: Paints tens to thousands of pixels in a single batch operation and single atomic undo step. Returns modified count, affected bounding box, and optional updated preview.", {
@@ -8,7 +9,7 @@ export function registerEditingTools(server, dispatcher, stateTracker) {
             x: z.number().int().describe("X coordinate in canvas space (0-indexed)"),
             y: z.number().int().describe("Y coordinate in canvas space (0-indexed)"),
             color: z.string().describe("Hex color e.g. #FF0000FF, #363636FF, or #00000000 for transparent"),
-        })).min(1).describe("Batch of pixel coordinates and hex colors to paint"),
+        })).min(1).max(MAX_PIXELS_BATCH).describe("Batch of pixel coordinates and hex colors to paint"),
         layerName: z.string().optional().describe("Optional target layer name (defaults to active layer)"),
         layerIndex: z.number().int().min(0).optional().describe("Optional target layer index"),
         frameNumber: z.number().int().positive().optional().describe("Target frame number (1-indexed, defaults to active frame)"),
@@ -100,7 +101,7 @@ export function registerEditingTools(server, dispatcher, stateTracker) {
         points: z.array(z.object({
             x: z.number().int(),
             y: z.number().int(),
-        })).min(1).describe("List of (x, y) pixel coordinates to erase"),
+        })).min(1).max(MAX_PIXELS_BATCH).describe("List of (x, y) pixel coordinates to erase"),
         layerName: z.string().optional().describe("Optional target layer name"),
         layerIndex: z.number().int().min(0).optional().describe("Optional target layer index"),
         frameNumber: z.number().int().positive().optional().describe("Target frame number (1-indexed)"),
