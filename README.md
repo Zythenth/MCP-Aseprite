@@ -1,61 +1,66 @@
-# Aseprite MCP Server 🎨
+# Aseprite MCP Server
 
-Servidor MCP oficial em **TypeScript / Node.js** que conecta o **Google Gemini** diretamente ao **Aseprite**, permitindo criar e editar pixel art iterativamente através de um ciclo visual completo de observação e pintura:
+Servidor Model Context Protocol (MCP) em TypeScript que conecta clientes compatíveis, como o Google Gemini, a um documento aberto no Aseprite.
 
-$$\text{Observar} \longrightarrow \text{Analisar} \longrightarrow \text{Pintar} \longrightarrow \text{Observar Novamente} \longrightarrow \text{Corrigir}$$
+O projeto permite inspecionar sprites, ler pixels, editar imagens, controlar camadas e frames e validar cada alteração por meio de previews PNG. A comunicação com o Aseprite ocorre por um bridge Lua local, sem automação de mouse e sem salvar arquivos automaticamente.
 
----
+Fluxo principal:
 
-## 🏛️ Arquitetura do Sistema
-
-```
-+-------------------------------------------------------------+
-|                       Google Gemini                         |
-+-------------------------------------------------------------+
-                              │
-                    MCP Protocol (stdio)
-          JSON-RPC 2.0 em stdout (logs estritos em stderr)
-                              ▼
-+-------------------------------------------------------------+
-|             Aseprite MCP Server (TypeScript/Node)           |
-|  - MCP Tools & Resources (@modelcontextprotocol/sdk)        |
-|  - Motor de Imagem Puro (Nearest-Neighbor, Grid & Rulers)   |
-|  - Servidor WebSocket Local (127.0.0.1:32123)              |
-+-------------------------------------------------------------+
-                              ▲
-                       WebSocket Local
-                         (JSON-RPC)
-                              ▼
-+-------------------------------------------------------------+
-|             Bridge Lua (lua/aseprite-bridge.lua)            |
-|  - Event-driven WebSocket nativo do Aseprite (sem travar)   |
-|  - Mini diálogo de status (Connected / Disconnected)        |
-|  - Transações Atômicas de Undo (app.transaction)            |
-|  - Normalização Cel.bounds -> Canvas Coordenadas Absolutas |
-+-------------------------------------------------------------+
-                              ▼
-+-------------------------------------------------------------+
-|                   Documento Aberto no Aseprite              |
-|              (Sprite Real / Camadas / Frames / Cels)        |
-+-------------------------------------------------------------+
+```text
+Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 ```
 
----
+## Recursos principais
 
-## 🚀 Requisitos
+- Inspeção visual com PNG, escala nearest-neighbor, grade e réguas de coordenadas.
+- Leitura exata de pixels em formatos hexadecimal, RGBA, indexado e compacto.
+- Pintura em lote com uma única etapa de Undo por operação.
+- Ferramentas para formas, paletas, camadas, frames, tags e arquivos.
+- Controle de revisão para acompanhar alterações no sprite.
+- Mock Bridge em memória para testes sem abrir o Aseprite.
+- Transporte MCP por `stdio`, com logs isolados em `stderr`.
+- WebSocket restrito ao loopback local `127.0.0.1:32123`.
 
-* **Sistema Operacional:** Windows 10/11 (ou macOS / Linux)
-* **Node.js:** Versão 18.0.0 ou superior (`node -v`)
-* **Aseprite:** Versão 1.2.30+ ou 1.3+ instalada
-* **PowerShell:** Para execução dos scripts no Windows
+## Arquitetura
 
----
+```text
+Cliente MCP
+    |
+    | MCP por stdio
+    v
+Aseprite MCP Server (Node.js/TypeScript)
+    |
+    | WebSocket JSON-RPC em 127.0.0.1:32123
+    v
+Bridge Lua
+    |
+    v
+Documento aberto no Aseprite
+```
 
-## 📦 Instalação
+O servidor registra as ferramentas MCP, processa imagens e encaminha comandos ao bridge. O bridge executa as operações no documento ativo usando a API Lua do Aseprite e agrupa edições em transações atômicas.
 
-### Opção 1: Instalação Automática no Windows (Recomendada)
+## Requisitos
 
-Abra o PowerShell na pasta do projeto e execute:
+- Node.js 18 ou superior.
+- npm.
+- Aseprite com suporte a WebSocket na API Lua.
+- PowerShell para usar os scripts auxiliares no Windows.
+
+Os comandos npm funcionam em Windows, macOS e Linux. A instalação automática do bridge fornecida neste repositório é específica para Windows.
+
+## Instalação rápida
+
+Clone o repositório e entre na pasta do projeto:
+
+```bash
+git clone https://github.com/Zythenth/MCP-Aseprite.git
+cd MCP-Aseprite
+```
+
+### Windows
+
+No PowerShell:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -63,42 +68,38 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
 O script:
-1. Valida o ambiente Node.js e npm.
-2. Instala as dependências (`npm install`).
-3. Compila o TypeScript (`npm run build`).
-4. Roda a suíte completa de testes (`npm test`).
-5. **Copia automaticamente** o script `lua/aseprite-bridge.lua` para a pasta de scripts do Aseprite (`%APPDATA%\Aseprite\scripts\aseprite-bridge.lua`).
 
-### Opção 2: Instalação Manual
+1. verifica Node.js e npm;
+2. instala as dependências;
+3. compila o TypeScript;
+4. executa os testes, exceto quando usado com `-SkipTests`;
+5. copia `lua/aseprite-bridge.lua` para a pasta de scripts quando encontra uma instalação do Aseprite no perfil do usuário.
+
+### Instalação manual
 
 ```bash
-# 1. Instalar dependências
 npm install
-
-# 2. Compilar TypeScript
 npm run build
-
-# 3. Executar os testes automatizados
 npm test
 ```
 
----
+O arquivo de entrada compilado será criado em `dist/index.js`.
 
-## 🔌 Como Iniciar o Bridge no Aseprite
+## Instalação do bridge no Aseprite
 
-1. Abra o **Aseprite**.
-2. Vá no menu: **File → Scripts → Open Scripts Folder**.
-3. Verifique se o arquivo `aseprite-bridge.lua` está na pasta (o script `install.ps1` já copia automaticamente; caso contrário, copie o arquivo da pasta `lua/aseprite-bridge.lua` para lá).
-4. No Aseprite, clique em: **File → Scripts → Rescan Scripts Folder**.
-5. Clique em: **File → Scripts → aseprite-bridge**.
-6. Uma pequena janela flutuante não intrusiva aparecerá mostrando:
-   * **Status:** `Connecting to 127.0.0.1:32123...` (ou `Connected (32123)` assim que o servidor MCP for iniciado).
+Se o instalador não copiar o bridge automaticamente:
 
----
+1. abra o Aseprite;
+2. acesse **File > Scripts > Open Scripts Folder**;
+3. copie `lua/aseprite-bridge.lua` para a pasta aberta;
+4. acesse **File > Scripts > Rescan Scripts Folder**;
+5. execute **File > Scripts > aseprite-bridge**.
 
-## ⚙️ Configuração no Gemini / Antigravity
+O diálogo do bridge mostra o estado da conexão. Ele tenta se conectar ao servidor em `127.0.0.1:32123` e reconecta automaticamente quando o servidor fica disponível.
 
-Adicione o servidor no seu arquivo de configuração do Gemini (`gemini_mcp.json` ou `mcpServers`):
+## Configuração do cliente MCP
+
+Compile o projeto antes de configurar o cliente. Depois, use o caminho absoluto de `dist/index.js`:
 
 ```json
 {
@@ -106,124 +107,144 @@ Adicione o servidor no seu arquivo de configuração do Gemini (`gemini_mcp.json
     "aseprite": {
       "command": "node",
       "args": [
-        "C:/Users/<seu-usuario>/OneDrive/Documentos/mcp/dist/index.js"
-      ],
-      "env": {
-        "ASEPRITE_MCP_PORT": "32123"
-      }
+        "C:/caminho/absoluto/MCP-Aseprite/dist/index.js"
+      ]
     }
   }
 }
 ```
 
-Ou via CLI do Antigravity:
+No Windows, barras normais funcionam dentro do JSON. Também é possível escapar barras invertidas, por exemplo `C:\\caminho\\MCP-Aseprite\\dist\\index.js`.
+
+O bridge e o servidor usam a porta `32123` por padrão. Se o servidor for configurado com outra porta por `ASEPRITE_PORT` ou `ASEPRITE_WS_PORT`, o valor de `PORT` no início de `lua/aseprite-bridge.lua` também precisa ser alterado.
+
+## Execução
+
+Quando iniciado pelo cliente MCP, o processo Node.js é aberto automaticamente. Para executá-lo manualmente:
 
 ```bash
-agy mcp add aseprite -- node C:/Users/<seu-usuario>/OneDrive/Documentos/mcp/dist/index.js
+npm start
 ```
 
----
+No Windows:
 
-## 🧪 Testes Automatizados (Sem Aseprite Aberto)
-
-O projeto inclui um **Mock Engine** em memória que emula completamente o Aseprite (camadas, cels, blending, transações de Undo e geração de PNG).
-
-Para rodar todos os testes automatizados:
-
-```bash
-npm test
+```powershell
+.\start.ps1
 ```
 
-Para iniciar o servidor MCP já acoplado ao Mock Bridge em segundo plano (ótimo para testar o Gemini mesmo sem o Aseprite aberto):
+Para iniciar o servidor junto com o Mock Bridge:
 
 ```powershell
 .\start.ps1 -Mock
 ```
 
----
+O modo mock é útil para testar a integração sem uma instância do Aseprite.
 
-## 🛠️ Catálogo Completo de Ferramentas MCP
+## Ferramentas MCP
 
-### 👁️ Ferramentas Primárias de Visão e Inspeção
+### Inspeção
 
-| Ferramenta | Descrição |
+| Ferramenta | Função |
 |---|---|
-| `inspect_sprite` | **Principal ferramenta de visão do Gemini.** Retorna na mesma chamada a imagem PNG (escala nearest-neighbor), dimensões, frame/layer atuais, revision e os pixels estruturados. |
-| `get_canvas` | Renderiza o frame como PNG nítido via conteúdo de imagem nativo do MCP (`image/png`). Suporta escala (`scale: 8`, etc.) e tabuleiro quadriculado opcional (`checkerboard`). |
-| `get_pixel_grid` | Retorna a matriz exata de pixels em coordenadas absolutas do canvas `(0,0)` no topo esquerdo. Formatos: `hex` (`#RRGGBBAA`), `rgba`, `indexed` ou `compact` (minipaleta de índices para economia crítica de tokens). |
-| `get_pixel_grid_preview` | Preview visual ampliado com **linhas de grade (grid)**, **réguas de coordenadas X/Y com fonte bitmap** e destaque de regiões ou pixels. |
-| `aseprite_status` | Verifica se o Aseprite está conectado, arquivo aberto, dimensões, quantidade de layers e frames, e número de revisão. |
-| `get_sprite_info` | Retorna a árvore hierárquica completa de camadas, opacidades, blend modes e durações dos frames. |
+| `aseprite_status` | Informa conexão, documento ativo, dimensões, camada, frame e revisão. |
+| `get_sprite_info` | Retorna a estrutura de camadas, frames, opacidades e modos de mesclagem. |
+| `inspect_sprite` | Retorna preview PNG e dados estruturados dos pixels na mesma chamada. |
+| `get_canvas` | Renderiza o frame ou uma camada como PNG com escala nearest-neighbor. |
+| `get_pixel_grid` | Lê pixels em coordenadas absolutas do canvas. |
+| `get_pixel_grid_preview` | Gera uma visualização ampliada com grade, réguas e destaques. |
 
-### 🖌️ Ferramentas de Pintura e Edição Transacional
+### Edição
 
-| Ferramenta | Descrição |
+| Ferramenta | Função |
 |---|---|
-| `set_pixels` | **Principal ferramenta de pintura.** Altera centenas a milhares de pixels em uma única chamada. Todas as alterações são agrupadas em **uma única transação de Undo** no Aseprite. Retorna bounds modificados e opcionalmente `returnPreview: true`. |
-| `set_pixel` | Pinta um pixel individual com cor `#RRGGBBAA`. |
-| `erase_pixels` | Apaga uma lista de coordenadas tornando-as transparentes (`#00000000`). |
-| `undo` | Desfaz a última ação atômica de edição no Aseprite. |
-| `redo` | Refaz a última ação desfeita. |
+| `set_pixels` | Pinta pixels em lote dentro de uma única transação de Undo. |
+| `set_pixel` | Pinta um pixel usando uma cor `#RRGGBBAA`. |
+| `erase_pixels` | Torna uma lista de coordenadas transparente. |
+| `undo` | Desfaz a última edição atômica. |
+| `redo` | Refaz a última edição desfeita. |
 
-### 📐 Formas Geométricas & Preenchimento
+### Formas e cores
 
-| Ferramenta | Descrição |
+- Formas: `draw_line`, `draw_rectangle`, `draw_ellipse`.
+- Preenchimento: `flood_fill`, `replace_color`.
+- Histórico visual: `get_changes_since`.
+- Paleta: `get_palette`, `set_palette_color`, `find_palette_color`.
+
+### Camadas, animação e arquivos
+
+- Camadas: `list_layers`, `create_layer`, `rename_layer`, `delete_layer`, `select_layer`, `set_layer_visibility`, `set_layer_opacity`, `move_layer`, `create_group`.
+- Frames e tags: `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `delete_frame`, `set_frame_duration`, `create_tag`, `list_tags`.
+- Arquivos e canvas: `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `export_png`, `resize_canvas`.
+
+As operações destrutivas de exclusão exigem `confirm: true`. O servidor nunca salva o documento automaticamente.
+
+## Exemplo de fluxo
+
+```text
+1. aseprite_status()
+2. inspect_sprite({ scale: 4, format: "compact" })
+3. set_pixels({
+     pixels: [
+       { x: 14, y: 8, color: "#0088FFFF" }
+     ],
+     returnPreview: true
+   })
+4. inspect_sprite({ scale: 4, format: "compact" })
+5. save_sprite()
+```
+
+Use `save_sprite` ou `save_sprite_as` somente depois de validar o resultado. Até essa chamada, as alterações permanecem no documento aberto sem sobrescrever o arquivo em disco.
+
+## Comandos de desenvolvimento
+
+| Comando | Descrição |
 |---|---|
-| `draw_line` | Desenha linhas usando o algoritmo de Bresenham para pixel art (com espessura customizável). |
-| `draw_rectangle` | Desenha retângulos (contorno ou preenchido). |
-| `draw_ellipse` | Desenha elipses e círculos (contorno ou preenchido). |
-| `flood_fill` | Balde de tinta (preenchimento por contiguidade) com tolerância de cor opcional. |
-| `replace_color` | Substitui uma cor por outra em toda a camada ou sprite. |
-| `get_changes_since` | Retorna a diferença de pixels e bounding box alterados desde uma `revision` anterior. |
+| `npm run build` | Compila o TypeScript em `dist/`. |
+| `npm start` | Executa o servidor compilado. |
+| `npm run dev` | Mantém o compilador TypeScript em modo watch. |
+| `npm test` | Executa toda a suíte com Vitest. |
+| `npm run test:unit` | Executa os testes unitários. |
+| `npm run test:integration` | Executa os testes de integração. |
+| `npm run test:e2e` | Executa os testes de ponta a ponta. |
+| `npm run test:watch` | Executa o Vitest em modo interativo. |
+| `npm run typecheck` | Verifica os tipos sem gerar arquivos. |
 
-### 🎨 Paleta de Cores
+## Segurança e comportamento
 
-| Ferramenta | Descrição |
-|---|---|
-| `get_palette` | Lista todas as cores da paleta com índice, RGBA e HEX. |
-| `set_palette_color` | Altera a cor de um índice específico da paleta. |
-| `find_palette_color` | Encontra a cor exata ou a mais próxima via distância euclidiana. |
+- O WebSocket aceita apenas endereços de loopback.
+- O canal `stdout` é reservado ao protocolo MCP; logs são enviados para `stderr`.
+- O bridge modifica somente o documento ativo no Aseprite.
+- O salvamento em disco depende de uma chamada explícita.
+- Edições em lote são agrupadas para permitir Undo atômico.
+- Entradas, coordenadas, limites e cores são validados antes da execução.
 
-### 📑 Camadas (Layers) & Animação (Frames)
+## Solução de problemas
 
-* **Camadas:** `list_layers`, `create_layer`, `rename_layer`, `delete_layer` (com `confirm: true`), `select_layer`, `set_layer_visibility`, `set_layer_opacity`, `move_layer`, `create_group`.
-* **Frames:** `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `delete_frame`, `set_frame_duration`, `create_tag`, `list_tags`.
-* **Documento/Canvas:** `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `export_png`, `resize_canvas`.
+### O bridge permanece desconectado
 
----
+- Confirme que o processo MCP está em execução.
+- Confirme que o bridge foi carregado em **File > Scripts**.
+- Verifique se a porta `32123` está livre.
+- Mantenha o mesmo número de porta no servidor e no bridge Lua.
 
-## 💡 Fluxo de Trabalho do Gemini na Prática
+### O cliente não encontra `dist/index.js`
 
-Ao conectar, o servidor envia automaticamente ao modelo um protocolo abrangente de pixel art que exige uma breve pré-produção antes de qualquer edição. Ele cobre inspeção e referências, especificação técnica do ativo, paleta e modos de cor, construção por clusters, contornos, luz e materiais, textura, anti-aliasing e dithering, animação, tiles/tilesets, iteração segura e validação de exportação. Também inclui um catálogo de falhas comuns, como pillow shading, banding, jaggies, doubles, ruído de pixels soltos, sel-out automático, palette drift, repetição visível de tiles, origem instável entre frames e interpolação que borra pixels. As escolhas explícitas do usuário, a referência, as limitações de hardware e os requisitos da engine sempre têm prioridade.
+Execute:
 
-O protocolo foi consolidado a partir da documentação oficial do Aseprite e do tutorial técnico da comunidade Pixel Joint:
+```bash
+npm install
+npm run build
+```
 
-* [Pixel Joint — The Pixel Art Tutorial](https://pixeljoint.com/forum/forum_posts.asp?TID=11299): controle deliberado, clusters, linhas, AA, dithering, banding, pillow shading, ruído, sel-out e construção de paleta.
-* [Aseprite — Color Mode](https://aseprite.com/docs/color-mode/) e [Color Profile](https://aseprite.com/docs/color-profile/): RGB/indexado, alpha, índice transparente e gerenciamento de perfil.
-* [Aseprite — Animation](https://aseprite.com/docs/animation/) e [Onion Skinning](https://aseprite.com/docs/onion-skinning/): frames, durações, tags, preview e comparação entre poses.
-* [Aseprite — Tiled Mode](https://aseprite.com/docs/tiled-mode/): validação de padrões repetidos.
-* [Aseprite — Sprite Sheets](https://aseprite.com/docs/sprite-sheet/) e [CLI](https://aseprite.com/docs/cli/): seleção por layers/tags, padding, trim, metadata e extrusão de bordas.
+Depois confirme que a configuração do cliente usa um caminho absoluto.
 
-### Exemplo 1: Analisar e Editar um Personagem
-1. **Gemini:** `inspect_sprite({ scale: 4, format: "compact" })`
-   *Recebe o PNG nítido e a matriz de pixels compacta.*
-2. **Gemini analisa visualmente:** "O olho direito em (14, 8) precisa ser azul."
-3. **Gemini:** `set_pixels({ pixels: [{ x: 14, y: 8, color: "#0088FFFF" }], returnPreview: true })`
-   *Recebe a confirmação e o novo preview atualizado imediatamente.*
-4. **Gemini verifica:** Confirma se o resultado visual ficou harmônico com o restante do sprite.
+### Os testes falham por conflito de porta
 
-### Exemplo 2: Criação do Zero
-1. `new_sprite({ width: 32, height: 32, colorMode: "rgb" })`
-2. `create_layer({ name: "Outline" })`
-3. `draw_rectangle({ x: 8, y: 8, width: 16, height: 16, color: "#111111FF", filled: true })`
-4. `inspect_sprite()`
-5. `save_sprite_as({ filePath: "C:/pixelart/personagem.aseprite" })`
+Feche processos antigos do servidor e execute `npm test` novamente. Os testes automatizados usam o Mock Bridge e não exigem o Aseprite aberto.
 
----
+## Referências
 
-## 🛡️ Isolamento e Segurança
-
-* **Comunicação Segura:** O servidor WebSocket escuta **estritamente em `127.0.0.1`** (loopback local), rejeitando conexões externas.
-* **Pureza do Protocolo Stdio:** 100% dos logs e mensagens de diagnóstico são enviados exclusivamente para `stderr`. O canal `stdout` é reservado sem interferências para o protocolo JSON-RPC.
-* **Proteção contra Sobrescrita Acidental:** Documentos abertos nunca são salvos em disco automaticamente; o salvamento só ocorre se o modelo chamar explicitamente `save_sprite` ou `save_sprite_as`.
-* **Resiliência do Aseprite:** O script Lua utiliza o loop de eventos/timers assíncrono do Aseprite, impedindo travamento da interface do usuário.
+- [Model Context Protocol](https://modelcontextprotocol.io/)
+- [Documentação de scripts do Aseprite](https://www.aseprite.org/docs/scripting/)
+- [API do Aseprite](https://www.aseprite.org/api/)
+- [Pixel Joint: The Pixel Art Tutorial](https://pixeljoint.com/forum/forum_posts.asp?TID=11299)
