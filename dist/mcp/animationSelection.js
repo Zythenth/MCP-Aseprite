@@ -14,6 +14,22 @@ export function buildPlaybackFrameNumbers(fromFrame, toFrame, direction) {
         return [...forward].reverse().concat(interior);
     throw new Error(`Unsupported animation direction: ${direction}`);
 }
+function buildFiniteTagPlaybackFrameNumbers(fromFrame, toFrame, direction, repeats) {
+    const forward = buildPlaybackFrameNumbers(fromFrame, toFrame, "forward");
+    const reverse = [...forward].reverse();
+    if (direction === "forward" || direction === "reverse") {
+        const pass = direction === "forward" ? forward : reverse;
+        return Array.from({ length: repeats }, () => pass).flat();
+    }
+    const startsForward = direction === "pingpong";
+    const result = [];
+    for (let passIndex = 0; passIndex < repeats; passIndex++) {
+        const forwardPass = passIndex % 2 === 0 ? startsForward : !startsForward;
+        const pass = forwardPass ? forward : reverse;
+        result.push(...(result.at(-1) === pass[0] ? pass.slice(1) : pass));
+    }
+    return result;
+}
 export function resolveAnimationPlayback(inspection, input) {
     if (!Array.isArray(inspection.frames) || inspection.frames.length < 1) {
         throw new Error("The active sprite has no animation frames.");
@@ -44,7 +60,13 @@ export function resolveAnimationPlayback(inspection, input) {
         throw new Error(`Frame range must satisfy 1 <= fromFrame <= toFrame <= ${lastFrame}.`);
     }
     const direction = input.direction ?? tag?.direction ?? "forward";
-    const frameNumbers = buildPlaybackFrameNumbers(fromFrame, toFrame, direction);
+    const repeats = tag ? Math.max(0, Math.floor(tag.repeats ?? 0)) : null;
+    if (repeats !== null && !Number.isFinite(repeats)) {
+        throw new Error("Aseprite returned invalid animation tag repeat metadata.");
+    }
+    const frameNumbers = tag && repeats > 0
+        ? buildFiniteTagPlaybackFrameNumbers(fromFrame, toFrame, direction, repeats)
+        : buildPlaybackFrameNumbers(fromFrame, toFrame, direction);
     const frames = frameNumbers.map((frameNumber, index) => {
         const frame = byNumber.get(frameNumber);
         if (!frame)
@@ -53,7 +75,6 @@ export function resolveAnimationPlayback(inspection, input) {
     });
     const totalDurationMs = frames.reduce((sum, frame) => sum + frame.durationMs, 0);
     const distinctDurations = new Set(frames.map((frame) => frame.durationMs));
-    const repeats = tag ? Math.max(0, Math.floor(tag.repeats ?? 0)) : null;
     return {
         tagName: tag?.name ?? null,
         fromFrame,

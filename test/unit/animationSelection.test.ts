@@ -18,6 +18,8 @@ const inspection: AnimationInspection = {
   tags: [
     { name: "walk", from: 1, to: 4, direction: "pingpong", repeats: 0 },
     { name: "attack", from: 2, to: 4, direction: "forward", repeats: 1 },
+    { name: "hop-once", from: 1, to: 4, direction: "pingpong", repeats: 1 },
+    { name: "hop-twice", from: 1, to: 4, direction: "pingpong", repeats: 2 },
   ],
   layers: [],
 };
@@ -46,6 +48,11 @@ describe("animation playback selection", () => {
     expect(playback.direction).toBe("reverse");
     expect(playback.repeats).toBe(1);
     expect(playback.loopsContinuously).toBe(false);
+  });
+
+  it("honors Aseprite finite ping-pong repeat semantics without duplicating turnaround frames", () => {
+    expect(resolveAnimationPlayback(inspection, { tagName: "hop-once" }).frameNumbers).toEqual([1, 2, 3, 4]);
+    expect(resolveAnimationPlayback(inspection, { tagName: "hop-twice" }).frameNumbers).toEqual([1, 2, 3, 4, 3, 2, 1]);
   });
 
   it("rejects ambiguous selectors, missing tags, and invalid ranges", () => {
