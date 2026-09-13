@@ -15,6 +15,10 @@ import {
   MAX_COMMAND_TIMEOUT_MS,
   DEFAULT_COMMAND_TIMEOUT_MS,
   resolvePortEnv,
+  BRIDGE_PROTOCOL_VERSION,
+  parseBooleanEnv,
+  parseToolsets,
+  TOOLSETS,
 } from "../../src/config.js";
 
 describe("Config Constants & Sanitization Tests", () => {
@@ -37,6 +41,12 @@ describe("Config Constants & Sanitization Tests", () => {
     expect(config.serverName).toBe("aseprite-mcp");
     expect(config.serverVersion).toBe("0.1.0");
     expect(config.protocolVersion).toBe("2024-11-05");
+  });
+
+  it("should define valid bridge protocol version", () => {
+    expect(BRIDGE_PROTOCOL_VERSION).toBe("1.0.0");
+    expect(config.bridgeProtocolVersion).toBe(BRIDGE_PROTOCOL_VERSION);
+    expect(config.bridgeProtocolVersion).not.toBe(config.protocolVersion);
   });
 
   describe("parseBridgeToken", () => {
@@ -82,6 +92,23 @@ describe("Config Constants & Sanitization Tests", () => {
       expect(() => parseBridgeToken("token_with_/_slash_12345678")).toThrow(/URL-safe characters/i);
       expect(() => parseBridgeToken("token_with_#_hash_123456789")).toThrow(/URL-safe characters/i);
       expect(() => parseBridgeToken("token_with_!_excl_123456789")).toThrow(/URL-safe characters/i);
+    });
+  });
+
+  describe("tool exposure configuration", () => {
+    it("parses strict boolean environment values", () => {
+      expect(parseBooleanEnv("TEST", undefined)).toBe(false);
+      expect(parseBooleanEnv("TEST", " yes ")).toBe(true);
+      expect(parseBooleanEnv("TEST", "OFF", true)).toBe(false);
+      expect(() => parseBooleanEnv("TEST", "sometimes")).toThrow(/Invalid TEST/);
+    });
+
+    it("enables all toolsets by default and validates explicit lists", () => {
+      expect(parseToolsets(undefined)).toEqual([...TOOLSETS]);
+      expect(parseToolsets("all")).toEqual([...TOOLSETS]);
+      expect(parseToolsets("visual,pixel-art")).toEqual(["core", "visual", "pixel-art"]);
+      expect(parseToolsets("visual,visual")).toEqual(["core", "visual"]);
+      expect(() => parseToolsets("visual,unknown")).toThrow(/unknown/);
     });
   });
 

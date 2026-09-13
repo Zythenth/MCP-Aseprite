@@ -6,6 +6,7 @@ import { BridgeState } from "../../bridge/state.js";
 import { decodePngBase64Sync, encodeRgbaToPngBase64 } from "../../image/png.js";
 import { scaleNearestNeighbor } from "../../image/scaling.js";
 import { MAX_PIXELS_BATCH } from "../../config.js";
+import { bridgeToolError, bridgeToolResult } from "./common.js";
 
 export function registerEditingTools(
   server: McpServer,
@@ -181,31 +182,11 @@ export function registerEditingTools(
   server.tool(
     "undo",
     "Undoes the most recent editing tool call or transaction on the active sprite.",
-    {},
-    async () => {
+    { returnPreview: z.boolean().optional().default(false) },
+    async (params) => {
       try {
-        const res = await dispatcher.send<any>("undo", {}, 5000);
-        if (typeof res.revision === "number") {
-          stateTracker.setRevision(res.revision);
-        }
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: true,
-                message: "Undo executed successfully",
-                revision: res.revision,
-              }, null, 2),
-            },
-          ],
-        };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }],
-          isError: true,
-        };
-      }
+        return bridgeToolResult(await dispatcher.send<any>("undo", params, 5000), stateTracker, params.returnPreview);
+      } catch (error) { return bridgeToolError(error); }
     }
   );
 
@@ -213,31 +194,11 @@ export function registerEditingTools(
   server.tool(
     "redo",
     "Redoes the most recently undone editing operation on the active sprite.",
-    {},
-    async () => {
+    { returnPreview: z.boolean().optional().default(false) },
+    async (params) => {
       try {
-        const res = await dispatcher.send<any>("redo", {}, 5000);
-        if (typeof res.revision === "number") {
-          stateTracker.setRevision(res.revision);
-        }
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: true,
-                message: "Redo executed successfully",
-                revision: res.revision,
-              }, null, 2),
-            },
-          ],
-        };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }],
-          isError: true,
-        };
-      }
+        return bridgeToolResult(await dispatcher.send<any>("redo", params, 5000), stateTracker, params.returnPreview);
+      } catch (error) { return bridgeToolError(error); }
     }
   );
 }

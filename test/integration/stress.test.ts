@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { WebSocket } from "ws";
+import { randomUUID } from "node:crypto";
 import { BridgeWebSocketServer } from "../../src/bridge/wsServer.js";
 import { CommandDispatcher } from "../../src/bridge/dispatcher.js";
 import { BridgeState } from "../../src/bridge/state.js";
-import { BridgeErrorCode, BridgeError } from "../../src/bridge/protocol.js";
+import { BRIDGE_PROTOCOL_VERSION, BridgeErrorCode, BridgeError } from "../../src/bridge/protocol.js";
 
 describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
   let dispatcher: CommandDispatcher;
@@ -14,10 +15,29 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
   const createClient = (port?: number, token?: string): Promise<WebSocket> => {
     return new Promise((resolve, reject) => {
       const targetPort = port ?? wsServer.getPort();
-      const url = token ? `ws://127.0.0.1:${targetPort}/?token=${encodeURIComponent(token)}` : `ws://127.0.0.1:${targetPort}`;
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(`ws://127.0.0.1:${targetPort}`);
       clientSockets.push(ws);
-      ws.on("open", () => resolve(ws));
+      const onMessage = (raw: WebSocket.RawData) => {
+        const message = JSON.parse(raw.toString());
+        if (message.event !== "hello_ack") return;
+        ws.off("message", onMessage);
+        resolve(ws);
+      };
+      ws.on("message", onMessage);
+      ws.on("open", () => {
+        ws.send(JSON.stringify({
+          event: "hello",
+          data: {
+            bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
+            asepriteVersion: "stress-test",
+            apiVersion: 0,
+            sessionId: randomUUID(),
+            revision: 1,
+            token,
+            capabilities: { stressTest: true },
+          },
+        }));
+      });
       ws.on("error", (err) => reject(err));
     });
   };
@@ -435,12 +455,7 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
     await smallServer.start();
 
     try {
-      const clientWs = new WebSocket(`ws://127.0.0.1:${smallServer.getPort()}`);
-      clientSockets.push(clientWs);
-      await new Promise<void>((resolve, reject) => {
-        clientWs.on("open", resolve);
-        clientWs.on("error", reject);
-      });
+      const clientWs = await createClient(smallServer.getPort());
 
       const oversizedPayload = "Z".repeat(2048);
       await expect(smallDispatcher.send("too_large", { blob: oversizedPayload })).rejects.toMatchObject({
@@ -466,12 +481,7 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
     await testServer.start();
 
     try {
-      const ws = new WebSocket(`ws://127.0.0.1:${testServer.getPort()}`);
-      clientSockets.push(ws);
-      await new Promise<void>((resolve, reject) => {
-        ws.on("open", resolve);
-        ws.on("error", reject);
-      });
+      const ws = await createClient(testServer.getPort());
 
       const closePromise = new Promise<{ code: number; reason: string }>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error("Timeout waiting for socket close on oversized frame")), 3000);

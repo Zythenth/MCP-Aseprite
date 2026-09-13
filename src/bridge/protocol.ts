@@ -7,6 +7,14 @@
 export const DEFAULT_BRIDGE_PORT = 32123;
 export const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 export const DEFAULT_COMMAND_TIMEOUT_MS = 8000;
+export const BRIDGE_PROTOCOL_VERSION = "1.0.0";
+
+export function isBridgeProtocolCompatible(version: unknown): version is string {
+  if (typeof version !== "string") return false;
+  const candidate = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  const current = /^(\d+)\.(\d+)\.(\d+)$/.exec(BRIDGE_PROTOCOL_VERSION);
+  return candidate !== null && current !== null && candidate[1] === current[1];
+}
 
 export enum BridgeErrorCode {
   NO_ACTIVE_SPRITE = "NO_ACTIVE_SPRITE",
@@ -50,7 +58,8 @@ export type BridgeEventType =
   | "layer_changed";
 
 export interface BridgeEventData {
-  revision: number;
+  revision?: number;
+  sessionId?: string;
   reason?: string;
   fromUndo?: boolean;
   activeFrame?: number;
@@ -61,6 +70,30 @@ export interface BridgeEventData {
     height: number;
   };
   [key: string]: unknown;
+}
+
+export interface BridgeHelloData {
+  bridgeProtocolVersion: string;
+  asepriteVersion: string;
+  apiVersion: number;
+  sessionId: string;
+  revision: number;
+  token?: string;
+  capabilities: Record<string, boolean>;
+}
+
+export interface BridgeHelloMessage {
+  event: "hello";
+  data: BridgeHelloData;
+}
+
+export interface BridgeHelloAckMessage {
+  event: "hello_ack";
+  data: {
+    bridgeProtocolVersion: string;
+    sessionId: string;
+    resyncRequired: boolean;
+  };
 }
 
 export interface BridgeEventMessage {
@@ -128,6 +161,20 @@ export interface BridgeStatusResult {
   activeLayer: string;
   activeFrame: number;
   revision: number;
+  bridgeProtocolVersion?: string | null;
+  asepriteVersion?: string | null;
+  apiVersion?: number | null;
+  sessionId?: string | null;
+  previousSessionId?: string | null;
+  compatible?: boolean;
+  capabilities?: Record<string, boolean>;
+  sync?: {
+    revision: number;
+    sessionId: string | null;
+    previousSessionId: string | null;
+    resyncRequired: boolean;
+    gap: boolean;
+  };
 }
 
 export type AsepriteStatusResult = BridgeStatusResult;

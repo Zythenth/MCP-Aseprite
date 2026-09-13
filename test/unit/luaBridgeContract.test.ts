@@ -72,6 +72,24 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(luaContent).not.toMatch(/params\.revision/);
     });
 
+    it("bounds tileset memory and validates tile writes before creating a cel", () => {
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
+      expect(luaContent).toMatch(/local\s+MAX_TILESET_PIXELS\s*=\s*16777216/);
+      expect(luaContent).toMatch(/width\s*\*\s*height\s*\*\s*count\s*>\s*MAX_TILESET_PIXELS/);
+
+      const setTiles = /handlers\.set_tiles\s*=\s*function\s*\(params\)([\s\S]*?)(?:\n\s*handlers\.|$)/.exec(luaContent)?.[1];
+      expect(setTiles).toBeDefined();
+      expect(setTiles!.indexOf('type(params.tiles) ~= "table"')).toBeLessThan(setTiles!.indexOf("spr:newCel"));
+      expect(setTiles).toMatch(/app\.transaction\(["']MCP set tiles["'][\s\S]*?spr:newCel/);
+    });
+
+    it("tracks linked cels across all layers and rejects self-links", () => {
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
+      expect(luaContent).toMatch(/local\s+function\s+linkedCelsForCel\s*\(spr,\s*cel\)/);
+      expect(luaContent).toMatch(/ipairs\(spr\.cels\s+or\s+\{\}\)/);
+      expect(luaContent).toMatch(/Source and target cel must be different/);
+    });
+
     it("validates complete absence of revisionSnapshots in TestHarness", () => {
       const harnessPath = path.resolve(rootDir, "test/harness/mockBridgeHarness.ts");
       const harnessContent = fs.readFileSync(harnessPath, "utf-8");
@@ -281,7 +299,7 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(body).toContain("createdFrameNumber =");
       expect(body).toContain("totalFrames =");
       expect(body).toContain("durationMs =");
-      expect(body).toContain("revision =");
+      expect(body).toMatch(/return\s+finishMutation\s*\(/);
     });
 
     it("validates create_tag validates frame bounds before newTag, applies color via parseHexRgba, and list_tags returns canonical #RRGGBBAA color", () => {
@@ -502,8 +520,11 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(luaContent).toContain("[^A-Za-z0-9%._%~%-]");
       expect(luaContent).not.toMatch(/\[\^%w/);
 
-      // 3. Conditional token query parameter
-      expect(luaContent).toMatch(/WS_URL\s*=\s*WS_BASE_URL\s*\.\.\s*["']\/\?token=["']\s*\.\.\s*BRIDGE_TOKEN/);
+      // 3. Token is sent only in the authenticated hello payload, never in the URL
+      expect(luaContent).toMatch(/WS_URL\s*=\s*WS_BASE_URL/);
+      expect(luaContent).not.toMatch(/WS_URL\s*=.*[?&]token=/);
+      expect(luaContent).toMatch(/event\s*=\s*["']hello["']/);
+      expect(luaContent).toMatch(/token\s*=\s*BRIDGE_TOKEN/);
 
       // 4. Token never leaked in UI labels or tips
       expect(luaContent).not.toMatch(/app\.tip\([^)]*BRIDGE_TOKEN/);

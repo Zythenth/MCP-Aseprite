@@ -1,0 +1,36 @@
+import type { BridgeState } from "../../bridge/state.js";
+
+export function bridgeToolResult(
+  result: any,
+  stateTracker: BridgeState,
+  returnPreview = false
+): any {
+  if (typeof result?.revision === "number") stateTracker.setRevision(result.revision);
+  const content: any[] = [];
+  if (returnPreview && typeof result?.pngBase64 === "string") {
+    content.push({ type: "image" as const, data: result.pngBase64, mimeType: "image/png" });
+  }
+  const textResult = result && typeof result === "object" && typeof result.pngBase64 === "string"
+    ? { ...result, pngBase64: undefined }
+    : result;
+  content.push({ type: "text" as const, text: JSON.stringify(textResult, null, 2) });
+  return { content };
+}
+
+export function bridgeToolError(error: unknown): any {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: message }, null, 2) }],
+    isError: true,
+  };
+}
+
+export function confirmationError(operation: string): any {
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({ success: false, error: `${operation} requires confirm: true` }, null, 2),
+    }],
+    isError: true,
+  };
+}

@@ -5,6 +5,7 @@
 -- ==============================================================================
 
 local DEFAULT_PORT = 32123
+local BRIDGE_PROTOCOL_VERSION = "1.0.0"
 
 local function parseEnvPort()
   local function getTrimmed(varName)
@@ -46,11 +47,9 @@ local BRIDGE_TOKEN = parseEnvToken()
 local AUTH_ENABLED = (BRIDGE_TOKEN ~= nil and #BRIDGE_TOKEN > 0)
 local WS_BASE_URL = "ws://127.0.0.1:" .. PORT
 local WS_URL = WS_BASE_URL
-if AUTH_ENABLED then
-  WS_URL = WS_BASE_URL .. "/?token=" .. BRIDGE_TOKEN
-end
 
 local MAX_PIXELS_BATCH = 100000
+local MAX_TILESET_PIXELS = 16777216
 local MAX_CHANGE_JOURNAL_ENTRIES = 128
 local JSON_NULL = {}
 
@@ -517,6 +516,11 @@ state.hookedSprites = {}
 state.spriteListeners = {}
 state.sitechangeListenerId = nil
 state.changeJournal = {}
+state.sessionId = tostring(os.time()) .. "-" .. tostring(math.random(10000000, 99999999)) .. "-" .. tostring({}):gsub("table: ", "")
+state.authenticated = false
+state.lastSpriteId = nil
+state.lastFrameNumber = nil
+state.lastLayerId = nil
 
 -- ------------------------------------------------------------------------------
 -- Helper: Color & Hex Conversions (Mode-Aware Native and Protocol RGBA)
@@ -692,6 +696,22 @@ local function exportFramePngBase64(sprite, frameNumber, targetLayer)
   return base64Encode(bytes)
 end
 
+local function exportImagePngBase64(image, sprite)
+  local tempFileName = string.format("ase_mcp_image_%d_%d.png", os.time(), math.random(1000, 9999))
+  local tempPath = app.fs.joinPath(app.fs.tempPath, tempFileName)
+  if sprite and sprite.colorMode == ColorMode.INDEXED and sprite.palettes and sprite.palettes[1] then
+    image:saveAs{ filename = tempPath, palette = sprite.palettes[1] }
+  else
+    image:saveAs(tempPath)
+  end
+  local file = io.open(tempPath, "rb")
+  if not file then return "" end
+  local bytes = file:read("*all")
+  file:close()
+  os.remove(tempPath)
+  return base64Encode(bytes)
+end
+
 -- ------------------------------------------------------------------------------
 -- Helper: Ensure Canvas-Sized Cel
 -- ------------------------------------------------------------------------------
@@ -723,15 +743,49 @@ local function resetChangeJournal()
   state.changeJournal = {}
 end
 
-local function recordPixelChange(rev, count, bounds)
-  table.insert(state.changeJournal, {
+local function recordChange(rev, scope, count, bounds, fullRefreshRequired, reason)
+  local entry = {
     revision = rev,
-    pixelsChanged = count,
-    bounds = bounds
-  })
+    scope = scope,
+    pixelsChanged = count or 0,
+    bounds = bounds or JSON_NULL,
+    fullRefreshRequired = fullRefreshRequired or false,
+    reason = reason
+  }
+  table.insert(state.changeJournal, entry)
   if #state.changeJournal > MAX_CHANGE_JOURNAL_ENTRIES then
     table.remove(state.changeJournal, 1)
   end
+end
+
+local function recordPixelChange(rev, count, bounds)
+  recordChange(rev, "pixels", count, bounds, false, "mcp_mutation")
+end
+
+local function rectToTable(rect)
+  if not rect then return { x = 0, y = 0, width = 0, height = 0 } end
+  return { x = rect.x, y = rect.y, width = rect.width, height = rect.height }
+end
+
+local function finishMutation(params, result, scope, bounds, frameNumber, fullRefreshRequired)
+  local spr = app.sprite
+  state.revision = state.revision + 1
+  result = result or {}
+  result.success = true
+  result.revision = state.revision
+  result.bounds = bounds or (spr and rectToTable(spr.bounds)) or { x = 0, y = 0, width = 0, height = 0 }
+  recordChange(
+    state.revision,
+    scope or "structure",
+    0,
+    result.bounds,
+    fullRefreshRequired == true,
+    "mcp_mutation"
+  )
+  if params and params.returnPreview and spr then
+    result.pngBase64 = exportFramePngBase64(spr, frameNumber)
+  end
+  return result
 end
 
 -- ------------------------------------------------------------------------------
@@ -760,42 +814,49 @@ local function findLayersByNameRecursive(container, name, matched)
   end
 end
 
-local function resolveTargetLayer(spr, params, forWriting)
-  if not spr then error("No active sprite open in Aseprite.") end
-  local byIndex = nil
-  if params.layerIndex ~= nil then
-    local idx = params.layerIndex
-    if type(idx) ~= "number" or math.floor(idx) ~= idx or idx < 0 or idx >= #spr.layers then
-      error("Invalid layerIndex: " .. tostring(idx))
-    end
-    byIndex = spr.layers[idx + 1]
+local function collectLayersRecursive(container, collected)
+  if not container or not container.layers then return end
+  for _, layer in ipairs(container.layers) do
+    table.insert(collected, layer)
+    if layer.isGroup then collectLayersRecursive(layer, collected) end
   end
+end
 
+local function resolveAnyLayer(spr, params, nameKey, indexKey)
+  nameKey = nameKey or "layerName"
+  indexKey = indexKey or "layerIndex"
+  local name = params[nameKey]
+  local index = params[indexKey]
   local byName = nil
-  if params.layerName ~= nil then
+  local byIndex = nil
+
+  if name ~= nil then
     local matched = {}
-    findLayersByNameRecursive(spr, params.layerName, matched)
-    if #matched == 0 then
-      error("Layer '" .. tostring(params.layerName) .. "' not found.")
-    elseif #matched > 1 then
-      error("Ambiguous layerName '" .. tostring(params.layerName) .. "': found multiple matching layers.")
-    end
+    findLayersByNameRecursive(spr, name, matched)
+    if #matched == 0 then error("Layer '" .. tostring(name) .. "' not found.") end
+    if #matched > 1 then error("Ambiguous layer name '" .. tostring(name) .. "'.") end
     byName = matched[1]
   end
 
-  local targetLayer = nil
-  if byIndex ~= nil and byName ~= nil then
-    if byIndex ~= byName then
-      error("Conflicting layer selectors: layerIndex and layerName refer to different layers.")
+  if index ~= nil then
+    if type(index) ~= "number" or math.floor(index) ~= index or index < 0 then
+      error("Invalid " .. indexKey .. ": " .. tostring(index))
     end
-    targetLayer = byIndex
-  elseif byIndex ~= nil then
-    targetLayer = byIndex
-  elseif byName ~= nil then
-    targetLayer = byName
-  else
-    targetLayer = app.layer or (spr.layers and spr.layers[1])
+    local flattened = {}
+    collectLayersRecursive(spr, flattened)
+    byIndex = flattened[index + 1]
+    if not byIndex then error("Invalid " .. indexKey .. ": " .. tostring(index)) end
   end
+
+  if byName and byIndex and byName ~= byIndex then
+    error("Conflicting layer selectors.")
+  end
+  return byName or byIndex or app.layer or spr.layers[1]
+end
+
+local function resolveTargetLayer(spr, params, forWriting)
+  if not spr then error("No active sprite open in Aseprite.") end
+  local targetLayer = resolveAnyLayer(spr, params)
 
   if not targetLayer then
     error("No target layer available.")
@@ -1124,8 +1185,7 @@ handlers.undo = function(params)
   app.undo()
   app.refresh()
   state.isExecutingMcp = false
-  state.revision = state.revision + 1
-  return { success = true, revision = state.revision }
+  return finishMutation(params, { message = "Undo executed successfully" }, "undo", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.redo = function(params)
@@ -1135,8 +1195,7 @@ handlers.redo = function(params)
   app.redo()
   app.refresh()
   state.isExecutingMcp = false
-  state.revision = state.revision + 1
-  return { success = true, revision = state.revision }
+  return finishMutation(params, { message = "Redo executed successfully" }, "redo", rectToTable(spr.bounds), nil, true)
 end
 
 -- Shape tools
@@ -1361,13 +1420,25 @@ end
 
 handlers.get_changes_since = function(params)
   local since = params.sinceRevision
-  if type(since) ~= "number" or since < 0 or math.floor(since) ~= since then
+  local requestedSessionId = params.sessionId
+  local function refreshRequired(reason)
     return {
       changed = true,
       sinceRevision = since,
       currentRevision = state.revision,
-      fullRefreshRequired = true
+      sessionId = state.sessionId,
+      resyncRequired = true,
+      gap = true,
+      fullRefreshRequired = true,
+      reason = reason
     }
+  end
+
+  if requestedSessionId ~= nil and requestedSessionId ~= state.sessionId then
+    return refreshRequired("session_changed")
+  end
+  if type(since) ~= "number" or since < 0 or math.floor(since) ~= since then
+    return refreshRequired("invalid_revision")
   end
 
   if since == state.revision then
@@ -1375,18 +1446,17 @@ handlers.get_changes_since = function(params)
       changed = false,
       sinceRevision = since,
       currentRevision = state.revision,
+      sessionId = state.sessionId,
+      resyncRequired = false,
+      gap = false,
       pixelsChanged = 0,
-      bounds = JSON_NULL
+      bounds = JSON_NULL,
+      changes = {}
     }
   end
 
   if since > state.revision or (state.revision - since) > MAX_CHANGE_JOURNAL_ENTRIES then
-    return {
-      changed = true,
-      sinceRevision = since,
-      currentRevision = state.revision,
-      fullRefreshRequired = true
-    }
+    return refreshRequired("revision_out_of_range")
   end
 
   local journalMap = {}
@@ -1397,37 +1467,48 @@ handlers.get_changes_since = function(params)
   local totalPixels = 0
   local minX, minY = 1e9, 1e9
   local maxX, maxY = -1e9, -1e9
+  local changes = {}
+  local fullRefreshRequired = false
 
   for r = since + 1, state.revision do
     local entry = journalMap[r]
     if not entry then
-      return {
-        changed = true,
-        sinceRevision = since,
-        currentRevision = state.revision,
-        fullRefreshRequired = true
-      }
+      return refreshRequired("journal_gap")
     end
+    table.insert(changes, entry)
     totalPixels = totalPixels + entry.pixelsChanged
-    if entry.bounds.x < minX then minX = entry.bounds.x end
-    if entry.bounds.y < minY then minY = entry.bounds.y end
-    local right = entry.bounds.x + entry.bounds.width - 1
-    local bottom = entry.bounds.y + entry.bounds.height - 1
-    if right > maxX then maxX = right end
-    if bottom > maxY then maxY = bottom end
+    if entry.fullRefreshRequired then fullRefreshRequired = true end
+    if entry.bounds ~= JSON_NULL and entry.bounds.width and entry.bounds.width > 0 and entry.bounds.height and entry.bounds.height > 0 then
+      if entry.bounds.x < minX then minX = entry.bounds.x end
+      if entry.bounds.y < minY then minY = entry.bounds.y end
+      local right = entry.bounds.x + entry.bounds.width - 1
+      local bottom = entry.bounds.y + entry.bounds.height - 1
+      if right > maxX then maxX = right end
+      if bottom > maxY then maxY = bottom end
+    end
+  end
+
+  local aggregateBounds = JSON_NULL
+  if maxX >= minX and maxY >= minY then
+    aggregateBounds = {
+      x = minX,
+      y = minY,
+      width = maxX - minX + 1,
+      height = maxY - minY + 1
+    }
   end
 
   return {
     changed = true,
     sinceRevision = since,
     currentRevision = state.revision,
+    sessionId = state.sessionId,
+    resyncRequired = false,
+    gap = false,
+    fullRefreshRequired = fullRefreshRequired,
     pixelsChanged = totalPixels,
-    bounds = {
-      x = minX,
-      y = minY,
-      width = maxX - minX + 1,
-      height = maxY - minY + 1
-    }
+    bounds = aggregateBounds,
+    changes = changes
   }
 end
 
@@ -1460,10 +1541,11 @@ handlers.set_palette_color = function(params)
   local g = tonumber(hex:sub(3, 4), 16) or 0
   local b = tonumber(hex:sub(5, 6), 16) or 0
   local a = #hex >= 8 and (tonumber(hex:sub(7, 8), 16) or 255) or 255
-  pal:setColor(params.index, Color{ r = r, g = g, b = b, a = a })
-  app.refresh()
-  state.revision = state.revision + 1
-  return { success = true, index = params.index, color = params.color, revision = state.revision }
+  executeMcpMutation(function()
+    pal:setColor(params.index, Color{ r = r, g = g, b = b, a = a })
+    app.refresh()
+  end)
+  return finishMutation(params, { index = params.index, color = params.color }, "palette", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.find_palette_color = function(params)
@@ -1518,15 +1600,20 @@ handlers.list_layers = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
   local layers = {}
-  for i, l in ipairs(spr.layers) do
+  local allLayers = {}
+  collectLayersRecursive(spr, allLayers)
+  for i, l in ipairs(allLayers) do
     table.insert(layers, {
       index = i,
+      flatIndex = i - 1,
       name = l.name,
       isVisible = l.isVisible,
       isEditable = l.isEditable,
       opacity = l.opacity or 255,
       isGroup = l.isGroup,
-      isBackground = l.isBackground
+      isBackground = l.isBackground,
+      parent = l.parent and l.parent.isGroup and l.parent.name or JSON_NULL,
+      stackIndex = l.stackIndex
     })
   end
   return { layers = layers }
@@ -1558,86 +1645,65 @@ handlers.create_layer = function(params)
     return l
   end)
 
-  state.revision = state.revision + 1
-  return { success = true, name = layer.name, revision = state.revision }
+  return finishMutation(params, { name = layer.name, parentGroup = targetGroup and targetGroup.name or JSON_NULL }, "layers", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.rename_layer = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
-  for _, l in ipairs(spr.layers) do
-    if l.name == params.oldName then
-      l.name = params.newName
-      app.refresh()
-      state.revision = state.revision + 1
-      return { success = true, oldName = params.oldName, newName = params.newName, revision = state.revision }
-    end
-  end
-  error("Layer not found: " .. tostring(params.oldName))
+  local layer = resolveAnyLayer(spr, { layerName = params.oldName })
+  executeMcpMutation(function() layer.name = params.newName; app.refresh() end)
+  return finishMutation(params, { oldName = params.oldName, newName = params.newName }, "layers", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.delete_layer = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
-  for _, l in ipairs(spr.layers) do
-    if l.name == params.name then
-      spr:deleteLayer(l)
-      app.refresh()
-      state.revision = state.revision + 1
-      return { success = true, deleted = params.name, revision = state.revision }
-    end
-  end
-  error("Layer not found: " .. tostring(params.name))
+  local layer = resolveAnyLayer(spr, { layerName = params.name })
+  executeMcpMutation(function() spr:deleteLayer(layer); app.refresh() end)
+  return finishMutation(params, { deleted = params.name }, "layers", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.select_layer = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
-  for _, l in ipairs(spr.layers) do
-    if l.name == params.name then
-      app.layer = l
-      return { success = true, activeLayer = l.name }
-    end
-  end
-  error("Layer not found: " .. tostring(params.name))
+  local layer = resolveAnyLayer(spr, { layerName = params.name })
+  app.layer = layer
+  return { success = true, activeLayer = layer.name }
 end
 
 handlers.set_layer_visibility = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
-  for _, l in ipairs(spr.layers) do
-    if l.name == params.name then
-      l.isVisible = params.visible
-      app.refresh()
-      state.revision = state.revision + 1
-      return { success = true, name = l.name, visible = l.isVisible, revision = state.revision }
-    end
-  end
-  error("Layer not found: " .. tostring(params.name))
+  local layer = resolveAnyLayer(spr, { layerName = params.name })
+  executeMcpMutation(function() layer.isVisible = params.visible; app.refresh() end)
+  return finishMutation(params, { name = layer.name, visible = layer.isVisible }, "layers", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.set_layer_opacity = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
-  for _, l in ipairs(spr.layers) do
-    if l.name == params.name then
-      l.opacity = params.opacity
-      app.refresh()
-      state.revision = state.revision + 1
-      return { success = true, name = l.name, opacity = l.opacity, revision = state.revision }
-    end
-  end
-  error("Layer not found: " .. tostring(params.name))
+  local layer = resolveAnyLayer(spr, { layerName = params.name })
+  executeMcpMutation(function() layer.opacity = params.opacity; app.refresh() end)
+  return finishMutation(params, { name = layer.name, opacity = layer.opacity }, "layers", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.create_group = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
-  local grp = spr:newGroup()
-  if params.name then grp.name = params.name end
-  app.refresh()
-  state.revision = state.revision + 1
-  return { success = true, group = grp.name, revision = state.revision }
+  local parentGroup = nil
+  if params.parentGroup then
+    parentGroup = resolveAnyLayer(spr, { layerName = params.parentGroup })
+    if not parentGroup.isGroup then error("parentGroup must name a group layer.") end
+  end
+  local grp = executeMcpMutation(function()
+    local created = spr:newGroup()
+    if params.name then created.name = params.name end
+    if parentGroup then created.parent = parentGroup end
+    app.refresh()
+    return created
+  end)
+  return finishMutation(params, { group = grp.name, parentGroup = parentGroup and parentGroup.name or JSON_NULL }, "layers", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.move_layer = function(params)
@@ -1690,15 +1756,818 @@ handlers.move_layer = function(params)
     app.refresh()
   end)
 
-  state.revision = state.revision + 1
-
-  return {
-    success = true,
+  return finishMutation(params, {
     name = targetLayer.name,
     fromIndex = fromIndex,
-    targetIndex = clampedTarget,
+    targetIndex = clampedTarget
+  }, "layers", rectToTable(spr.bounds), nil, true)
+end
+
+-- Explicit cel tools
+local function celBounds(cel)
+  return {
+    x = cel.position.x,
+    y = cel.position.y,
+    width = cel.image.width,
+    height = cel.image.height
+  }
+end
+
+local function linkedCelsForCel(spr, cel)
+  local linked = {}
+  local imageId = cel.image and cel.image.id or nil
+  for _, other in ipairs(spr.cels or {}) do
+    local otherId = other.image and other.image.id or nil
+    if other ~= cel and ((imageId and otherId == imageId) or other.image == cel.image) then
+      table.insert(linked, { layer = other.layer.name, frameNumber = other.frame.frameNumber })
+    end
+  end
+  table.sort(linked, function(a, b)
+    if a.layer == b.layer then return a.frameNumber < b.frameNumber end
+    return a.layer < b.layer
+  end)
+  return linked
+end
+
+local function linkedFramesForCel(spr, layer, cel)
+  local frames = {}
+  for _, linked in ipairs(linkedCelsForCel(spr, cel)) do
+    if linked.layer == layer.name then table.insert(frames, linked.frameNumber) end
+  end
+  table.sort(frames)
+  return frames
+end
+
+handlers.get_cel = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local layer = resolveTargetLayer(spr, params, false)
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  local cel = layer:cel(frame)
+  if not cel then
+    return { success = true, hasCel = false, layer = layer.name, frameNumber = frame.frameNumber, revision = state.revision }
+  end
+  local linkedCels = linkedCelsForCel(spr, cel)
+  local linkedFrames = linkedFramesForCel(spr, layer, cel)
+  return {
+    success = true,
+    hasCel = true,
+    layer = layer.name,
+    frameNumber = frame.frameNumber,
+    cel = {
+      bounds = celBounds(cel),
+      position = { x = cel.position.x, y = cel.position.y },
+      opacity = cel.opacity or 255,
+      zIndex = cel.zIndex or 0,
+      isLinked = #linkedCels > 0,
+      linkedFrames = linkedFrames,
+      linkedCels = linkedCels
+    },
     revision = state.revision
   }
+end
+
+handlers.create_cel = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local layer = resolveTargetLayer(spr, params, true)
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  if layer:cel(frame) then error("Cel already exists at target layer and frame.") end
+  local width = params.width or spr.width
+  local height = params.height or spr.height
+  if type(width) ~= "number" or width < 1 or width > 4096 or math.floor(width) ~= width then error("Invalid cel width.") end
+  if type(height) ~= "number" or height < 1 or height > 4096 or math.floor(height) ~= height then error("Invalid cel height.") end
+  local x = params.x or 0
+  local y = params.y or 0
+  local cel = executeMcpMutation(function()
+    local created = nil
+    app.transaction("MCP create cel", function()
+      local image = Image(width, height, spr.colorMode)
+      image:clear(encodeColorToPixel(spr, params.color or "#00000000"))
+      created = spr:newCel(layer, frame, image, Point(x, y))
+    end)
+    app.refresh()
+    return created
+  end)
+  return finishMutation(params, {
+    layer = layer.name,
+    frameNumber = frame.frameNumber,
+    position = { x = x, y = y }
+  }, "cel", celBounds(cel), frame.frameNumber, false)
+end
+
+handlers.delete_cel = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if params.confirm ~= true then error("delete_cel requires confirm: true") end
+  local layer = resolveTargetLayer(spr, params, true)
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  local cel = layer:cel(frame)
+  if not cel then error("Cel not found at target layer and frame.") end
+  local bounds = celBounds(cel)
+  executeMcpMutation(function()
+    app.transaction("MCP delete cel", function() spr:deleteCel(cel) end)
+    app.refresh()
+  end)
+  return finishMutation(params, { layer = layer.name, frameNumber = frame.frameNumber }, "cel", bounds, frame.frameNumber, false)
+end
+
+handlers.set_cel_position = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local layer = resolveTargetLayer(spr, params, true)
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  local cel = layer:cel(frame)
+  if not cel then error("Cel not found at target layer and frame.") end
+  local hasAbsolute = params.x ~= nil or params.y ~= nil
+  local hasRelative = params.dx ~= nil or params.dy ~= nil
+  if hasAbsolute == hasRelative then error("Provide either x/y or dx/dy, but not both.") end
+  local oldBounds = celBounds(cel)
+  local newX = hasAbsolute and (params.x or cel.position.x) or (cel.position.x + (params.dx or 0))
+  local newY = hasAbsolute and (params.y or cel.position.y) or (cel.position.y + (params.dy or 0))
+  if newX == cel.position.x and newY == cel.position.y then
+    return { success = true, changed = false, position = { x = newX, y = newY }, bounds = oldBounds, revision = state.revision }
+  end
+  executeMcpMutation(function()
+    app.transaction("MCP move cel", function() cel.position = Point(newX, newY) end)
+    app.refresh()
+  end)
+  local newBounds = celBounds(cel)
+  local oldRect = Rectangle(oldBounds.x, oldBounds.y, oldBounds.width, oldBounds.height)
+  local newRect = Rectangle(newBounds.x, newBounds.y, newBounds.width, newBounds.height)
+  return finishMutation(params, {
+    changed = true,
+    layer = layer.name,
+    frameNumber = frame.frameNumber,
+    position = { x = newX, y = newY }
+  }, "cel", rectToTable(oldRect:union(newRect)), frame.frameNumber, false)
+end
+
+handlers.set_cel_opacity = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local layer = resolveTargetLayer(spr, params, true)
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  local cel = layer:cel(frame)
+  if not cel then error("Cel not found at target layer and frame.") end
+  if type(params.opacity) ~= "number" or math.floor(params.opacity) ~= params.opacity or params.opacity < 0 or params.opacity > 255 then
+    error("opacity must be an integer from 0 through 255.")
+  end
+  if cel.opacity == params.opacity then
+    return { success = true, changed = false, opacity = cel.opacity, bounds = celBounds(cel), revision = state.revision }
+  end
+  executeMcpMutation(function()
+    app.transaction("MCP set cel opacity", function() cel.opacity = params.opacity end)
+    app.refresh()
+  end)
+  return finishMutation(params, { changed = true, layer = layer.name, frameNumber = frame.frameNumber, opacity = cel.opacity }, "cel", celBounds(cel), frame.frameNumber, false)
+end
+
+handlers.link_cel = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local sourceLayer = resolveAnyLayer(spr, params, "sourceLayerName", "sourceLayerIndex")
+  local targetLayer = resolveAnyLayer(spr, params, "targetLayerName", "targetLayerIndex")
+  if not sourceLayer or sourceLayer.isGroup or not targetLayer or targetLayer.isGroup then error("Source and target must be image layers.") end
+  local sourceFrame = resolveTargetFrame(spr, params.sourceFrame)
+  local targetFrame = resolveTargetFrame(spr, params.targetFrame)
+  if sourceLayer == targetLayer and sourceFrame == targetFrame then
+    error("Source and target cel must be different.")
+  end
+  local sourceCel = sourceLayer:cel(sourceFrame)
+  if not sourceCel then error("Source cel not found.") end
+  local existing = targetLayer:cel(targetFrame)
+  if existing and params.replaceExisting ~= true then error("Target cel already exists; set replaceExisting: true to replace it.") end
+  local linked = executeMcpMutation(function()
+    local created = nil
+    app.transaction("MCP link cel", function()
+      if existing then spr:deleteCel(existing) end
+      created = spr:newCel(targetLayer, targetFrame, sourceCel.image, sourceCel.position)
+      created.opacity = sourceCel.opacity
+    end)
+    app.refresh()
+    return created
+  end)
+  return finishMutation(params, {
+    sourceLayer = sourceLayer.name,
+    sourceFrame = sourceFrame.frameNumber,
+    targetLayer = targetLayer.name,
+    targetFrame = targetFrame.frameNumber,
+    linked = true
+  }, "cel", celBounds(linked), targetFrame.frameNumber, false)
+end
+
+handlers.unlink_cel = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local layer = resolveTargetLayer(spr, params, true)
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  local cel = layer:cel(frame)
+  if not cel then error("Cel not found at target layer and frame.") end
+  if #linkedCelsForCel(spr, cel) == 0 then
+    return { success = true, changed = false, linked = false, bounds = celBounds(cel), revision = state.revision }
+  end
+  executeMcpMutation(function()
+    app.transaction("MCP unlink cel", function() cel.image = cel.image:clone() end)
+    app.refresh()
+  end)
+  return finishMutation(params, { changed = true, layer = layer.name, frameNumber = frame.frameNumber, linked = false }, "cel", celBounds(cel), frame.frameNumber, false)
+end
+
+-- Recursive layer/group and composition tools
+handlers.list_layer_tree = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local flatIndex = 0
+  local function visit(container)
+    local nodes = {}
+    for _, layer in ipairs(container.layers or {}) do
+      local node = {
+        index = flatIndex,
+        uuid = tostring(layer.uuid or ""),
+        name = layer.name,
+        stackIndex = layer.stackIndex,
+        isVisible = layer.isVisible,
+        isEditable = layer.isEditable,
+        isLocked = layer.isLocked,
+        opacity = layer.opacity or 255,
+        isGroup = layer.isGroup,
+        isImage = layer.isImage,
+        isTilemap = layer.isTilemap,
+        isBackground = layer.isBackground
+      }
+      flatIndex = flatIndex + 1
+      if layer.isGroup then node.children = visit(layer) end
+      table.insert(nodes, node)
+    end
+    return nodes
+  end
+  return { success = true, layers = visit(spr), revision = state.revision }
+end
+
+handlers.move_layer_to_group = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local layer = resolveAnyLayer(spr, { layerName = params.name }, "layerName", "layerIndex")
+  local parent = spr
+  if params.parentGroup then
+    parent = resolveAnyLayer(spr, { layerName = params.parentGroup }, "layerName", "layerIndex")
+    if not parent.isGroup then error("Target parent is not a group.") end
+    local cursor = parent
+    while cursor and cursor ~= spr do
+      if cursor == layer then error("Cannot move a group into itself or one of its descendants.") end
+      cursor = cursor.parent
+    end
+  end
+  local previousParent = layer.parent
+  if previousParent == parent and (params.targetIndex == nil or layer.stackIndex == params.targetIndex) then
+    return { success = true, changed = false, name = layer.name, parentGroup = params.parentGroup or JSON_NULL, bounds = rectToTable(spr.bounds), revision = state.revision }
+  end
+  executeMcpMutation(function()
+    app.transaction("MCP move layer to group", function()
+      layer.parent = parent
+      if params.targetIndex ~= nil then
+        local maxIndex = #(parent.layers or spr.layers)
+        layer.stackIndex = math.max(1, math.min(maxIndex, params.targetIndex))
+      end
+    end)
+    app.refresh()
+  end)
+  return finishMutation(params, { changed = true, name = layer.name, parentGroup = params.parentGroup or JSON_NULL, stackIndex = layer.stackIndex }, "layers", rectToTable(spr.bounds), nil, true)
+end
+
+handlers.ungroup_layer = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local group = resolveAnyLayer(spr, { layerName = params.name }, "layerName", "layerIndex")
+  if not group.isGroup then error("Layer is not a group: " .. tostring(params.name)) end
+  local parent = group.parent or spr
+  local groupIndex = group.stackIndex
+  local children = {}
+  for _, child in ipairs(group.layers or {}) do table.insert(children, child) end
+  executeMcpMutation(function()
+    app.transaction("MCP ungroup layer", function()
+      for i, child in ipairs(children) do
+        child.parent = parent
+        child.stackIndex = math.min(#parent.layers, groupIndex + i - 1)
+      end
+      spr:deleteLayer(group)
+    end)
+    app.refresh()
+  end)
+  local names = {}
+  for _, child in ipairs(children) do table.insert(names, child.name) end
+  return finishMutation(params, { group = params.name, children = names }, "layers", rectToTable(spr.bounds), nil, true)
+end
+
+local BLEND_MODES = {
+  normal = BlendMode.NORMAL, src = BlendMode.SRC, multiply = BlendMode.MULTIPLY,
+  screen = BlendMode.SCREEN, overlay = BlendMode.OVERLAY, darken = BlendMode.DARKEN,
+  lighten = BlendMode.LIGHTEN, color_dodge = BlendMode.COLOR_DODGE, color_burn = BlendMode.COLOR_BURN,
+  hard_light = BlendMode.HARD_LIGHT, soft_light = BlendMode.SOFT_LIGHT, difference = BlendMode.DIFFERENCE,
+  exclusion = BlendMode.EXCLUSION, hsl_hue = BlendMode.HSL_HUE,
+  hsl_saturation = BlendMode.HSL_SATURATION, hsl_color = BlendMode.HSL_COLOR,
+  hsl_luminosity = BlendMode.HSL_LUMINOSITY, addition = BlendMode.ADDITION,
+  subtract = BlendMode.SUBTRACT, divide = BlendMode.DIVIDE
+}
+
+handlers.set_layer_blend_mode = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local layer = resolveTargetLayer(spr, params, true)
+  local mode = BLEND_MODES[params.blendMode]
+  if not mode then error("Unsupported blend mode: " .. tostring(params.blendMode)) end
+  if layer.blendMode == mode then
+    return { success = true, changed = false, name = layer.name, blendMode = params.blendMode, bounds = rectToTable(spr.bounds), revision = state.revision }
+  end
+  executeMcpMutation(function()
+    app.transaction("MCP set layer blend mode", function() layer.blendMode = mode end)
+    app.refresh()
+  end)
+  return finishMutation(params, { changed = true, name = layer.name, blendMode = params.blendMode }, "layers", rectToTable(spr.bounds), nil, false)
+end
+
+handlers.merge_down_layer = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if params.confirm ~= true then error("merge_down_layer requires confirm: true") end
+  local layer = resolveTargetLayer(spr, params, true)
+  if layer.stackIndex <= 1 then error("Cannot merge the bottom layer down.") end
+  local oldActive = app.layer
+  local mergedName = layer.name
+  executeMcpMutation(function()
+    app.transaction("MCP merge down", function()
+      app.layer = layer
+      app.command.MergeDownLayer()
+    end)
+    app.refresh()
+  end)
+  local resultLayer = app.layer
+  if oldActive and oldActive ~= layer and oldActive.sprite then pcall(function() app.layer = oldActive end) end
+  return finishMutation(params, { mergedLayer = mergedName, resultLayer = resultLayer and resultLayer.name or "" }, "layers", rectToTable(spr.bounds), nil, true)
+end
+
+handlers.flatten_layers = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if params.confirm ~= true then error("flatten_layers requires confirm: true") end
+  if #spr.layers <= 1 then
+    return { success = true, changed = false, layerCount = #spr.layers, bounds = rectToTable(spr.bounds), revision = state.revision }
+  end
+  executeMcpMutation(function()
+    app.transaction("MCP flatten layers", function() spr:flatten() end)
+    app.refresh()
+  end)
+  return finishMutation(params, { changed = true, layerCount = #spr.layers, layer = spr.layers[1] and spr.layers[1].name or "" }, "layers", rectToTable(spr.bounds), nil, true)
+end
+
+-- Slice tools
+local function findSliceByName(spr, name)
+  local found = nil
+  for _, slice in ipairs(spr.slices or {}) do
+    if slice.name == name then
+      if found then error("Ambiguous slice name: " .. tostring(name)) end
+      found = slice
+    end
+  end
+  if not found then error("Slice not found: " .. tostring(name)) end
+  return found
+end
+
+local function validateSliceGeometry(bounds, center, pivot)
+  if not bounds or bounds.width < 1 or bounds.height < 1 then error("Slice bounds must be non-empty.") end
+  if center and center ~= JSON_NULL then
+    if center.width < 1 or center.height < 1 or center.x < 0 or center.y < 0 or
+       center.x + center.width > bounds.width or center.y + center.height > bounds.height then
+      error("Slice center must be a non-empty rectangle inside the slice in local coordinates.")
+    end
+  end
+  if pivot and pivot ~= JSON_NULL then
+    if pivot.x < 0 or pivot.y < 0 or pivot.x >= bounds.width or pivot.y >= bounds.height then
+      error("Slice pivot must be inside the slice in local coordinates.")
+    end
+  end
+end
+
+local function sliceToTable(slice)
+  return {
+    name = slice.name,
+    bounds = rectToTable(slice.bounds),
+    center = slice.center and rectToTable(slice.center) or JSON_NULL,
+    pivot = slice.pivot and { x = slice.pivot.x, y = slice.pivot.y } or JSON_NULL,
+    color = slice.color and rgbaToHex({ r = slice.color.red, g = slice.color.green, b = slice.color.blue, a = slice.color.alpha }) or JSON_NULL,
+    data = slice.data or ""
+  }
+end
+
+handlers.list_slices = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local slices = {}
+  for _, slice in ipairs(spr.slices or {}) do table.insert(slices, sliceToTable(slice)) end
+  return { success = true, slices = slices, revision = state.revision }
+end
+
+handlers.get_slice = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  return { success = true, slice = sliceToTable(findSliceByName(spr, params.name)), revision = state.revision }
+end
+
+handlers.create_slice = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  for _, slice in ipairs(spr.slices or {}) do if slice.name == params.name then error("Slice already exists: " .. params.name) end end
+  validateSliceGeometry(params.bounds, params.center, params.pivot)
+  local slice = executeMcpMutation(function()
+    local created = nil
+    app.transaction("MCP create slice", function()
+      created = spr:newSlice(Rectangle(params.bounds.x, params.bounds.y, params.bounds.width, params.bounds.height))
+      created.name = params.name
+      if params.center then created.center = Rectangle(params.center.x, params.center.y, params.center.width, params.center.height) end
+      if params.pivot then created.pivot = Point(params.pivot.x, params.pivot.y) end
+      if params.color then local c = parseHexRgba(params.color); created.color = Color{ r = c.r, g = c.g, b = c.b, a = c.a } end
+      if params.data then created.data = params.data end
+    end)
+    app.refresh()
+    return created
+  end)
+  return finishMutation(params, { slice = sliceToTable(slice) }, "slices", rectToTable(slice.bounds), nil, false)
+end
+
+handlers.update_slice = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local slice = findSliceByName(spr, params.name)
+  if params.newName and params.newName ~= params.name then
+    for _, other in ipairs(spr.slices or {}) do if other.name == params.newName then error("Slice already exists: " .. params.newName) end end
+  end
+  local nextBounds = params.bounds or rectToTable(slice.bounds)
+  local nextCenter = params.center == nil and (slice.center and rectToTable(slice.center) or nil) or params.center
+  local nextPivot = params.pivot == nil and (slice.pivot and { x = slice.pivot.x, y = slice.pivot.y } or nil) or params.pivot
+  validateSliceGeometry(nextBounds, nextCenter, nextPivot)
+  local oldBounds = slice.bounds
+  executeMcpMutation(function()
+    app.transaction("MCP update slice", function()
+      if params.bounds then slice.bounds = Rectangle(params.bounds.x, params.bounds.y, params.bounds.width, params.bounds.height) end
+      if params.center ~= nil then
+        slice.center = params.center == JSON_NULL and nil or Rectangle(params.center.x, params.center.y, params.center.width, params.center.height)
+      end
+      if params.pivot ~= nil then slice.pivot = params.pivot == JSON_NULL and nil or Point(params.pivot.x, params.pivot.y) end
+      if params.newName then slice.name = params.newName end
+      if params.color then local c = parseHexRgba(params.color); slice.color = Color{ r = c.r, g = c.g, b = c.b, a = c.a } end
+      if params.data ~= nil then slice.data = params.data end
+    end)
+    app.refresh()
+  end)
+  return finishMutation(params, { slice = sliceToTable(slice) }, "slices", rectToTable(oldBounds:union(slice.bounds)), nil, false)
+end
+
+handlers.delete_slice = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if params.confirm ~= true then error("delete_slice requires confirm: true") end
+  local slice = findSliceByName(spr, params.name)
+  local bounds = rectToTable(slice.bounds)
+  executeMcpMutation(function()
+    app.transaction("MCP delete slice", function() spr:deleteSlice(slice) end)
+    app.refresh()
+  end)
+  return finishMutation(params, { deleted = params.name }, "slices", bounds, nil, false)
+end
+
+-- Persistent selection tools
+local function selectionResult(spr)
+  local selection = spr.selection
+  return {
+    isEmpty = selection.isEmpty,
+    bounds = selection.isEmpty and JSON_NULL or rectToTable(selection.bounds),
+    origin = { x = selection.origin.x, y = selection.origin.y }
+  }
+end
+
+handlers.get_selection = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local result = selectionResult(spr)
+  result.success = true
+  result.revision = state.revision
+  return result
+end
+
+handlers.set_selection = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local rect = Rectangle(params.x, params.y, params.width, params.height):intersect(spr.bounds)
+  if rect.isEmpty then error("Selection rectangle does not intersect the sprite canvas.") end
+  local operation = params.operation or "replace"
+  executeMcpMutation(function()
+    app.transaction("MCP set selection", function()
+      if operation == "replace" then spr.selection:select(rect)
+      elseif operation == "add" then spr.selection:add(rect)
+      elseif operation == "subtract" then spr.selection:subtract(rect)
+      elseif operation == "intersect" then spr.selection:intersect(rect)
+      else error("Unsupported selection operation: " .. tostring(operation)) end
+    end)
+    app.refresh()
+  end)
+  local result = selectionResult(spr)
+  return finishMutation(params, result, "selection", rectToTable(rect), nil, false)
+end
+
+handlers.clear_selection = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if spr.selection.isEmpty then
+    local result = selectionResult(spr); result.success = true; result.revision = state.revision; result.changed = false; return result
+  end
+  local oldBounds = rectToTable(spr.selection.bounds)
+  executeMcpMutation(function()
+    app.transaction("MCP clear selection", function() spr.selection:deselect() end)
+    app.refresh()
+  end)
+  local result = selectionResult(spr); result.changed = true
+  return finishMutation(params, result, "selection", oldBounds, nil, false)
+end
+
+handlers.invert_selection = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  executeMcpMutation(function()
+    app.transaction("MCP invert selection", function()
+      local inverted = Selection(spr.bounds)
+      inverted:subtract(spr.selection)
+      spr.selection = inverted
+    end)
+    app.refresh()
+  end)
+  local result = selectionResult(spr); result.changed = true
+  return finishMutation(params, result, "selection", rectToTable(spr.bounds), nil, false)
+end
+
+-- Tileset and tilemap tools (Aseprite 1.3+)
+local function requireTilemapApi()
+  if not ColorMode.TILEMAP or not app.pixelColor.tile or not app.pixelColor.tileI or not app.pixelColor.tileF then
+    error("Tilemap tools require Aseprite 1.3 or newer.")
+  end
+end
+
+local function resolveTileset(spr, zeroBasedIndex)
+  requireTilemapApi()
+  if type(zeroBasedIndex) ~= "number" or math.floor(zeroBasedIndex) ~= zeroBasedIndex or zeroBasedIndex < 0 then
+    error("Invalid tilesetIndex: " .. tostring(zeroBasedIndex))
+  end
+  local tileset = spr.tilesets[zeroBasedIndex + 1]
+  if not tileset then error("Tileset not found at index " .. tostring(zeroBasedIndex)) end
+  return tileset
+end
+
+local function tilesetToTable(tileset, index)
+  local grid = tileset.grid
+  return {
+    index = index,
+    name = tileset.name,
+    baseIndex = tileset.baseIndex,
+    tileCount = #tileset,
+    grid = {
+      x = grid.origin.x,
+      y = grid.origin.y,
+      tileWidth = grid.tileSize.width,
+      tileHeight = grid.tileSize.height
+    },
+    data = tileset.data or ""
+  }
+end
+
+handlers.list_tilesets = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  requireTilemapApi()
+  local result = {}
+  for index, tileset in ipairs(spr.tilesets or {}) do table.insert(result, tilesetToTable(tileset, index - 1)) end
+  return { success = true, tilesets = result, revision = state.revision }
+end
+
+handlers.create_tileset = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  requireTilemapApi()
+  local width = params.tileWidth
+  local height = params.tileHeight
+  local count = params.tileCount or 1
+  if type(width) ~= "number" or width < 1 or width > 1024 or math.floor(width) ~= width then error("Invalid tileWidth.") end
+  if type(height) ~= "number" or height < 1 or height > 1024 or math.floor(height) ~= height then error("Invalid tileHeight.") end
+  if type(count) ~= "number" or count < 1 or count > 4096 or math.floor(count) ~= count then error("Invalid tileCount.") end
+  if width * height * count > MAX_TILESET_PIXELS then
+    error("Tileset exceeds the 16,777,216 pixel safety limit.")
+  end
+  local tileset = executeMcpMutation(function()
+    local created = nil
+    app.transaction("MCP create tileset", function()
+      created = spr:newTileset(Rectangle(0, 0, width, height), count)
+      created.name = params.name
+      created.baseIndex = params.baseIndex or 1
+    end)
+    app.refresh()
+    return created
+  end)
+  return finishMutation(params, { tileset = tilesetToTable(tileset, #spr.tilesets - 1) }, "tilesets", rectToTable(spr.bounds), nil, true)
+end
+
+handlers.delete_tileset = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if params.confirm ~= true then error("delete_tileset requires confirm: true") end
+  local tileset = resolveTileset(spr, params.tilesetIndex)
+  local allLayers = {}
+  collectLayersRecursive(spr, allLayers)
+  for _, layer in ipairs(allLayers) do
+    if layer.isTilemap and layer.tileset == tileset then error("Cannot delete a tileset while a tilemap layer references it.") end
+  end
+  executeMcpMutation(function()
+    app.transaction("MCP delete tileset", function() spr:deleteTileset(tileset) end)
+    app.refresh()
+  end)
+  return finishMutation(params, { deletedTilesetIndex = params.tilesetIndex }, "tilesets", rectToTable(spr.bounds), nil, true)
+end
+
+handlers.get_tile = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local tileset = resolveTileset(spr, params.tilesetIndex)
+  local tile = tileset:tile(params.tileIndex)
+  if not tile then error("Tile not found at index " .. tostring(params.tileIndex)) end
+  return {
+    success = true,
+    tilesetIndex = params.tilesetIndex,
+    tileIndex = tile.index,
+    width = tile.image.width,
+    height = tile.image.height,
+    color = tile.color and string.format("#%02X%02X%02X%02X", tile.color.red, tile.color.green, tile.color.blue, tile.color.alpha) or JSON_NULL,
+    data = tile.data or "",
+    pngBase64 = exportImagePngBase64(tile.image, spr),
+    revision = state.revision
+  }
+end
+
+handlers.set_tile_pixels = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local tileset = resolveTileset(spr, params.tilesetIndex)
+  if params.tileIndex == 0 then error("Tile 0 is reserved as the empty tile.") end
+  local tile = tileset:tile(params.tileIndex)
+  if not tile then error("Tile not found at index " .. tostring(params.tileIndex)) end
+  if type(params.pixels) ~= "table" or #params.pixels < 1 or #params.pixels > MAX_PIXELS_BATCH then error("Invalid tile pixel batch.") end
+  local image = tile.image:clone()
+  local minX, minY = image.width, image.height
+  local maxX, maxY = -1, -1
+  local changed = 0
+  for _, pixel in ipairs(params.pixels) do
+    if pixel.x < 0 or pixel.y < 0 or pixel.x >= image.width or pixel.y >= image.height then error("Tile pixel outside tile bounds.") end
+    local native = encodeColorToPixel(spr, pixel.color)
+    if image:getPixel(pixel.x, pixel.y) ~= native then
+      image:putPixel(pixel.x, pixel.y, native)
+      changed = changed + 1
+      minX = math.min(minX, pixel.x); minY = math.min(minY, pixel.y)
+      maxX = math.max(maxX, pixel.x); maxY = math.max(maxY, pixel.y)
+    end
+  end
+  if changed == 0 then return { success = true, changed = false, pixelsChanged = 0, bounds = { x = 0, y = 0, width = 0, height = 0 }, revision = state.revision } end
+  executeMcpMutation(function()
+    app.transaction("MCP set tile pixels", function() tile.image = image end)
+    app.refresh()
+  end)
+  local result = finishMutation({}, {
+    changed = true, pixelsChanged = changed, tilesetIndex = params.tilesetIndex, tileIndex = params.tileIndex
+  }, "tilesets", { x = minX, y = minY, width = maxX - minX + 1, height = maxY - minY + 1 }, nil, true)
+  if params.returnPreview then result.pngBase64 = exportImagePngBase64(image, spr) end
+  return result
+end
+
+handlers.create_tilemap_layer = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local tileset = resolveTileset(spr, params.tilesetIndex)
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  local parentGroup = nil
+  if params.parentGroup then
+    parentGroup = resolveAnyLayer(spr, { layerName = params.parentGroup })
+    if not parentGroup.isGroup then error("parentGroup is not a group.") end
+  end
+  local oldLayer = app.layer
+  local oldFrame = app.frame
+  local layer = executeMcpMutation(function()
+    local created = nil
+    local ok, mutationError = pcall(function()
+      app.transaction("MCP create tilemap layer", function()
+        app.frame = frame
+        app.command.NewLayer{
+          name = params.name,
+          tilemap = true,
+          gridBounds = Rectangle(0, 0, tileset.grid.tileSize.width, tileset.grid.tileSize.height),
+          ask = false,
+          top = true
+        }
+        created = app.layer
+        local generatedTileset = created.tileset
+        created.tileset = tileset
+        if generatedTileset and generatedTileset ~= tileset then pcall(function() spr:deleteTileset(generatedTileset) end) end
+        if parentGroup then created.parent = parentGroup end
+        if not created:cel(frame) then
+          local gridWidth = math.ceil(spr.width / tileset.grid.tileSize.width)
+          local gridHeight = math.ceil(spr.height / tileset.grid.tileSize.height)
+          spr:newCel(created, frame, Image(gridWidth, gridHeight, ColorMode.TILEMAP), Point(0, 0))
+        end
+      end)
+    end)
+    if oldLayer then pcall(function() app.layer = oldLayer end) end
+    if oldFrame then pcall(function() app.frame = oldFrame end) end
+    if not ok then error(mutationError) end
+    app.refresh()
+    return created
+  end)
+  return finishMutation(params, { name = layer.name, tilesetIndex = params.tilesetIndex, frameNumber = frame.frameNumber }, "tilemaps", rectToTable(spr.bounds), frame.frameNumber, true)
+end
+
+handlers.get_tilemap = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  requireTilemapApi()
+  local layer = resolveAnyLayer(spr, params)
+  if not layer.isTilemap then error("Target layer is not a tilemap.") end
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  local cel = layer:cel(frame)
+  if not cel then return { success = true, hasCel = false, layer = layer.name, frameNumber = frame.frameNumber, revision = state.revision } end
+  local rows = {}
+  for y = 0, cel.image.height - 1 do
+    local row = {}
+    for x = 0, cel.image.width - 1 do
+      local value = cel.image:getPixel(x, y)
+      local flags = app.pixelColor.tileF(value)
+      table.insert(row, {
+        tileIndex = app.pixelColor.tileI(value),
+        xFlip = (flags & 0x80000000) ~= 0,
+        yFlip = (flags & 0x40000000) ~= 0,
+        diagonalFlip = (flags & 0x20000000) ~= 0
+      })
+    end
+    table.insert(rows, row)
+  end
+  return {
+    success = true, hasCel = true, layer = layer.name, frameNumber = frame.frameNumber,
+    width = cel.image.width, height = cel.image.height,
+    tileWidth = layer.tileset.grid.tileSize.width, tileHeight = layer.tileset.grid.tileSize.height,
+    origin = { x = cel.position.x, y = cel.position.y }, tiles = rows, revision = state.revision
+  }
+end
+
+handlers.set_tiles = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  requireTilemapApi()
+  local layer = resolveAnyLayer(spr, params)
+  if not layer.isTilemap then error("Target layer is not a tilemap.") end
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  if type(params.tiles) ~= "table" or #params.tiles < 1 or #params.tiles > MAX_PIXELS_BATCH then error("Invalid tile batch.") end
+  local cel = layer:cel(frame)
+  local gridWidth = math.ceil(spr.width / layer.tileset.grid.tileSize.width)
+  local gridHeight = math.ceil(spr.height / layer.tileset.grid.tileSize.height)
+  local image = cel and cel.image:clone() or Image(gridWidth, gridHeight, ColorMode.TILEMAP)
+  if not cel then image:clear(app.pixelColor.tile(0, 0)) end
+  local celPosition = cel and cel.position or Point(0, 0)
+  local minX, minY = image.width, image.height
+  local maxX, maxY = -1, -1
+  local changed = 0
+  for _, item in ipairs(params.tiles) do
+    if item.x < 0 or item.y < 0 or item.x >= image.width or item.y >= image.height then error("Tile cell outside tilemap bounds.") end
+    if item.tileIndex < 0 or item.tileIndex >= #layer.tileset then error("tileIndex outside tileset bounds.") end
+    local flags = (item.xFlip and 0x80000000 or 0) | (item.yFlip and 0x40000000 or 0) | (item.diagonalFlip and 0x20000000 or 0)
+    local value = app.pixelColor.tile(item.tileIndex, flags)
+    if image:getPixel(item.x, item.y) ~= value then
+      image:putPixel(item.x, item.y, value)
+      changed = changed + 1
+      minX = math.min(minX, item.x); minY = math.min(minY, item.y)
+      maxX = math.max(maxX, item.x); maxY = math.max(maxY, item.y)
+    end
+  end
+  if changed == 0 then return { success = true, changed = false, tilesChanged = 0, bounds = { x = 0, y = 0, width = 0, height = 0 }, revision = state.revision } end
+  executeMcpMutation(function()
+    app.transaction("MCP set tiles", function()
+      if cel then
+        cel.image = image
+      else
+        cel = spr:newCel(layer, frame, image, celPosition)
+      end
+    end)
+    app.refresh()
+  end)
+  local tileWidth = layer.tileset.grid.tileSize.width
+  local tileHeight = layer.tileset.grid.tileSize.height
+  local bounds = {
+    x = celPosition.x + minX * tileWidth, y = celPosition.y + minY * tileHeight,
+    width = (maxX - minX + 1) * tileWidth, height = (maxY - minY + 1) * tileHeight
+  }
+  return finishMutation(params, { changed = true, tilesChanged = changed, layer = layer.name, frameNumber = frame.frameNumber }, "tilemaps", bounds, frame.frameNumber, false)
 end
 
 -- Frame tools
@@ -1749,15 +2618,12 @@ handlers.create_frame = function(params)
     return newF
   end)
 
-  state.revision = state.revision + 1
-  return {
-    success = true,
+  return finishMutation(params, {
     frameNumber = f.frameNumber,
     createdFrameNumber = f.frameNumber,
     totalFrames = #spr.frames,
-    durationMs = math.floor(f.duration * 1000),
-    revision = state.revision
-  }
+    durationMs = math.floor(f.duration * 1000)
+  }, "frames", rectToTable(spr.bounds), f.frameNumber, true)
 end
 
 handlers.duplicate_frame = function(params)
@@ -1775,15 +2641,11 @@ handlers.duplicate_frame = function(params)
     return f
   end)
 
-  state.revision = state.revision + 1
-
-  return {
-    success = true,
+  return finishMutation(params, {
     copiedFrom = frameNumber,
     newFrameNumber = newFrame.frameNumber,
-    totalFrames = #spr.frames,
-    revision = state.revision
-  }
+    totalFrames = #spr.frames
+  }, "frames", rectToTable(spr.bounds), newFrame.frameNumber, true)
 end
 
 handlers.delete_frame = function(params)
@@ -1791,10 +2653,8 @@ handlers.delete_frame = function(params)
   if not spr then error("No active sprite.") end
   local f = spr.frames[params.frameNumber]
   if not f then error("Frame not found.") end
-  spr:deleteFrame(f)
-  app.refresh()
-  state.revision = state.revision + 1
-  return { success = true, deletedFrame = params.frameNumber, revision = state.revision }
+  executeMcpMutation(function() spr:deleteFrame(f); app.refresh() end)
+  return finishMutation(params, { deletedFrame = params.frameNumber }, "frames", rectToTable(spr.bounds), nil, true)
 end
 
 handlers.set_frame_duration = function(params)
@@ -1802,9 +2662,8 @@ handlers.set_frame_duration = function(params)
   if not spr then error("No active sprite.") end
   local f = spr.frames[params.frameNumber]
   if not f then error("Frame not found.") end
-  f.duration = params.durationMs / 1000
-  state.revision = state.revision + 1
-  return { success = true, frameNumber = f.frameNumber, durationMs = params.durationMs, revision = state.revision }
+  executeMcpMutation(function() f.duration = params.durationMs / 1000 end)
+  return finishMutation(params, { frameNumber = f.frameNumber, durationMs = params.durationMs }, "frames", rectToTable(spr.bounds), f.frameNumber, false)
 end
 
 handlers.create_tag = function(params)
@@ -1826,6 +2685,15 @@ handlers.create_tag = function(params)
   local tag = executeMcpMutation(function()
     local t = spr:newTag(fromFrame, toFrame)
     if params.name then t.name = params.name end
+    local directions = {
+      forward = AniDir.FORWARD,
+      reverse = AniDir.REVERSE,
+      pingpong = AniDir.PING_PONG,
+      pingpong_reverse = AniDir.PING_PONG_REVERSE
+    }
+    local direction = params.direction or "forward"
+    if not directions[direction] then error("Invalid tag direction: " .. tostring(direction)) end
+    t.aniDir = directions[direction]
     if params.color then
       local rgba = parseHexRgba(params.color)
       t.color = Color{ r = rgba.r, g = rgba.g, b = rgba.b, a = rgba.a }
@@ -1833,8 +2701,7 @@ handlers.create_tag = function(params)
     return t
   end)
 
-  state.revision = state.revision + 1
-  return { success = true, tag = tag.name, revision = state.revision }
+  return finishMutation(params, { tag = tag.name }, "tags", rectToTable(spr.bounds), nil, false)
 end
 
 handlers.list_tags = function(params)
@@ -1842,11 +2709,16 @@ handlers.list_tags = function(params)
   if not spr then error("No active sprite.") end
   local tags = {}
   for _, t in ipairs(spr.tags) do
+    local direction = "forward"
+    if t.aniDir == AniDir.REVERSE then direction = "reverse"
+    elseif t.aniDir == AniDir.PING_PONG then direction = "pingpong"
+    elseif t.aniDir == AniDir.PING_PONG_REVERSE then direction = "pingpong_reverse" end
     local item = {
       name = t.name,
       from = t.fromFrame.frameNumber,
       to = t.toFrame.frameNumber,
-      color = t.color and string.format("#%02X%02X%02X%02X", t.color.red, t.color.green, t.color.blue, t.color.alpha) or nil
+      color = t.color and string.format("#%02X%02X%02X%02X", t.color.red, t.color.green, t.color.blue, t.color.alpha) or nil,
+      direction = direction
     }
     table.insert(tags, item)
   end
@@ -1865,7 +2737,10 @@ handlers.new_sprite = function(params)
   app.refresh()
   state.revision = 1
   resetChangeJournal()
-  return { success = true, width = w, height = h, colorMode = params.colorMode or "rgb", revision = state.revision }
+  recordChange(state.revision, "sprite", 0, rectToTable(spr.bounds), true, "new_sprite")
+  local result = { success = true, width = w, height = h, colorMode = params.colorMode or "rgb", revision = state.revision }
+  if params.returnPreview then result.pngBase64 = exportFramePngBase64(spr, 1) end
+  return result
 end
 
 handlers.open_sprite = function(params)
@@ -1874,6 +2749,7 @@ handlers.open_sprite = function(params)
   app.sprite = spr
   state.revision = 1
   resetChangeJournal()
+  recordChange(state.revision, "sprite", 0, rectToTable(spr.bounds), true, "open_sprite")
   return { success = true, filename = spr.filename, revision = state.revision }
 end
 
@@ -1961,6 +2837,141 @@ handlers.export_png = function(params)
   }
 end
 
+handlers.export_sprite_sheet = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if not params.outputPath or type(params.outputPath) ~= "string" or #params.outputPath == 0 then
+    error("outputPath is required.")
+  end
+  if params.overwrite ~= true then
+    local existing = io.open(params.outputPath, "r")
+    if existing then existing:close(); error("File already exists and overwrite is false: " .. tostring(params.outputPath)) end
+  end
+
+  local scale = params.scale or 1
+  local spacing = params.spacing or 0
+  if type(scale) ~= "number" or math.floor(scale) ~= scale or scale < 1 or scale > 32 then
+    error("scale must be an integer between 1 and 32.")
+  end
+  if type(spacing) ~= "number" or math.floor(spacing) ~= spacing or spacing < 0 or spacing > 64 then
+    error("spacing must be an integer between 0 and 64.")
+  end
+
+  local frameNumbers = {}
+  local selectedTag = nil
+  if params.tagName then
+    if params.fromFrame or params.toFrame then error("tagName is mutually exclusive with fromFrame/toFrame.") end
+    for _, tag in ipairs(spr.tags) do if tag.name == params.tagName then selectedTag = tag; break end end
+    if not selectedTag then error("Tag not found: " .. tostring(params.tagName)) end
+    local fromFrame = selectedTag.fromFrame.frameNumber
+    local toFrame = selectedTag.toFrame.frameNumber
+    if selectedTag.aniDir == AniDir.REVERSE or selectedTag.aniDir == AniDir.PING_PONG_REVERSE then
+      for frame = toFrame, fromFrame, -1 do table.insert(frameNumbers, frame) end
+      if selectedTag.aniDir == AniDir.PING_PONG_REVERSE then
+        for frame = fromFrame + 1, toFrame - 1 do table.insert(frameNumbers, frame) end
+      end
+    else
+      for frame = fromFrame, toFrame do table.insert(frameNumbers, frame) end
+      if selectedTag.aniDir == AniDir.PING_PONG then
+        for frame = toFrame - 1, fromFrame + 1, -1 do table.insert(frameNumbers, frame) end
+      end
+    end
+  else
+    if (params.fromFrame == nil) ~= (params.toFrame == nil) then error("fromFrame and toFrame must be provided together.") end
+    local fromFrame = params.fromFrame or ((app.frame and app.frame.frameNumber) or 1)
+    local toFrame = params.toFrame or fromFrame
+    if fromFrame < 1 or toFrame > #spr.frames or fromFrame > toFrame then
+      error("Invalid frame range.")
+    end
+    for frame = fromFrame, toFrame do table.insert(frameNumbers, frame) end
+  end
+  if #frameNumbers < 1 or #frameNumbers > 256 then error("Export range must contain between 1 and 256 frames.") end
+
+  local selectedLayers = nil
+  if params.layerNames then
+    if type(params.layerNames) ~= "table" or #params.layerNames < 1 or #params.layerNames > 64 then
+      error("layerNames must contain between 1 and 64 layer names.")
+    end
+    selectedLayers = {}
+    local selectedSet = {}
+    for _, name in ipairs(params.layerNames) do
+      local layer = resolveAnyLayer(spr, { layerName = name })
+      if layer.isGroup then error("Group layers cannot be exported directly: " .. tostring(name)) end
+      selectedSet[layer] = true
+    end
+    local allLayers = {}
+    collectLayersRecursive(spr, allLayers)
+    for _, layer in ipairs(allLayers) do if selectedSet[layer] then table.insert(selectedLayers, layer) end end
+  end
+
+  local layout = params.layout or "horizontal"
+  local columns
+  if layout == "horizontal" then columns = #frameNumbers
+  elseif layout == "vertical" then columns = 1
+  elseif layout == "grid" then
+    columns = params.columns or math.ceil(math.sqrt(#frameNumbers))
+    if type(columns) ~= "number" or math.floor(columns) ~= columns or columns < 1 or columns > 64 then
+      error("columns must be an integer between 1 and 64.")
+    end
+  else error("Invalid layout: " .. tostring(layout)) end
+  columns = math.min(columns, #frameNumbers)
+  local rows = math.ceil(#frameNumbers / columns)
+  local frameWidth = spr.width * scale
+  local frameHeight = spr.height * scale
+  local outputWidth = columns * frameWidth + (columns - 1) * spacing
+  local outputHeight = rows * frameHeight + (rows - 1) * spacing
+  if outputWidth * outputHeight > 67108864 then error("Sprite sheet exceeds the 67,108,864 pixel safety limit.") end
+
+  local sheet = Image(ImageSpec{
+    width = outputWidth,
+    height = outputHeight,
+    colorMode = spr.colorMode,
+    transparentColor = spr.transparentColor
+  })
+  sheet:clear(getTransparentPixel(spr))
+  for index, frameNumber in ipairs(frameNumbers) do
+    local frameImage = Image(spr.spec)
+    frameImage:clear(getTransparentPixel(spr))
+    if selectedLayers then
+      for _, layer in ipairs(selectedLayers) do
+        if layer.isVisible then
+          local cel = layer:cel(frameNumber)
+          if cel and cel.image then
+            local opacity = math.floor(((cel.opacity or 255) * (layer.opacity or 255) + 127) / 255)
+            frameImage:drawImage(cel.image, cel.position, opacity, layer.blendMode or BlendMode.NORMAL)
+          end
+        end
+      end
+    else
+      frameImage:drawSprite(spr, frameNumber, Point(0, 0))
+    end
+    if scale > 1 then frameImage:resize{ width = frameWidth, height = frameHeight } end
+    local x = ((index - 1) % columns) * (frameWidth + spacing)
+    local y = math.floor((index - 1) / columns) * (frameHeight + spacing)
+    sheet:drawImage(frameImage, Point(x, y))
+  end
+
+  if spr.colorMode == ColorMode.INDEXED and spr.palettes and spr.palettes[1] then
+    sheet:saveAs{ filename = params.outputPath, palette = spr.palettes[1] }
+  else
+    sheet:saveAs(params.outputPath)
+  end
+  return {
+    success = true,
+    outputPath = params.outputPath,
+    frameNumbers = frameNumbers,
+    tagName = selectedTag and selectedTag.name or nil,
+    layerNames = params.layerNames,
+    layout = layout,
+    columns = columns,
+    rows = rows,
+    scale = scale,
+    spacing = spacing,
+    width = outputWidth,
+    height = outputHeight
+  }
+end
+
 handlers.resize_canvas = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
@@ -2013,7 +3024,6 @@ handlers.resize_canvas = function(params)
       bounds = Rectangle{ x = x, y = y, width = newW, height = newH }
     }
     app.refresh()
-    state.revision = state.revision + 1
   end)
 
   local ox = -x
@@ -2021,8 +3031,7 @@ handlers.resize_canvas = function(params)
   local oy = -y
   if oy == 0 then oy = 0 end
 
-  return {
-    success = true,
+  return finishMutation(params, {
     previousWidth = oldW,
     previousHeight = oldH,
     width = newW,
@@ -2030,9 +3039,8 @@ handlers.resize_canvas = function(params)
     oldDimensions = { width = oldW, height = oldH },
     newDimensions = { width = newW, height = newH },
     anchor = anchor,
-    contentOffset = { x = ox, y = oy },
-    revision = state.revision
-  }
+    contentOffset = { x = ox, y = oy }
+  }, "canvas", { x = 0, y = 0, width = newW, height = newH }, nil, true)
 end
 
 -- ------------------------------------------------------------------------------
@@ -2049,13 +3057,36 @@ local function initWebSocket(dlg)
     onreceive = function(msgType, data, err)
       if msgType == WebSocketMessageType.OPEN then
         local authStatus = AUTH_ENABLED and "enabled" or "disabled"
-        dlg:modify{ id = "status_lbl", text = "Connected (" .. PORT .. ") [Auth: " .. authStatus .. "]" }
-        app.tip("Connected to MCP Server (127.0.0.1:" .. PORT .. ") [Auth: " .. authStatus .. "]", 3)
+        state.authenticated = false
+        dlg:modify{ id = "status_lbl", text = "Authenticating (" .. PORT .. ")..." }
+        local hello = {
+          event = "hello",
+          data = {
+            bridgeProtocolVersion = BRIDGE_PROTOCOL_VERSION,
+            asepriteVersion = tostring(app.version or "unknown"),
+            apiVersion = tonumber(app.apiVersion) or 0,
+            sessionId = state.sessionId,
+            revision = state.revision,
+            token = BRIDGE_TOKEN,
+            capabilities = {
+              changeJournal = true,
+              frameEvents = true,
+              layerEvents = true,
+              safeJson = true
+            }
+          }
+        }
+        local sent = pcall(function() state.ws:sendText(bridgeJson.encode(hello)) end)
+        if not sent then
+          dlg:modify{ id = "status_lbl", text = "Handshake failed (check server logs)" }
+        end
 
       elseif msgType == WebSocketMessageType.CLOSE then
+        state.authenticated = false
         dlg:modify{ id = "status_lbl", text = "Disconnected (Reconnecting...)" }
 
       elseif msgType == WebSocketMessageType.ERROR then
+        state.authenticated = false
         dlg:modify{ id = "status_lbl", text = "Connection error (check server logs)" }
 
       elseif msgType == WebSocketMessageType.TEXT then
@@ -2064,7 +3095,23 @@ local function initWebSocket(dlg)
           return
         end
 
-        if req.id and req.command and handlers[req.command] then
+        if req.event == "hello_ack" and req.data then
+          local serverVersion = tostring(req.data.bridgeProtocolVersion or "")
+          local serverMajor = serverVersion:match("^(%d+)%.")
+          local clientMajor = BRIDGE_PROTOCOL_VERSION:match("^(%d+)%.")
+          if serverMajor == clientMajor and req.data.sessionId == state.sessionId then
+            state.authenticated = true
+            local authStatus = AUTH_ENABLED and "enabled" or "disabled"
+            local syncStatus = req.data.resyncRequired and "resync required" or "in sync"
+            dlg:modify{ id = "status_lbl", text = "Connected (" .. PORT .. ") [" .. syncStatus .. "]" }
+            app.tip("Connected to MCP Server (127.0.0.1:" .. PORT .. ") [Auth: " .. authStatus .. "]", 3)
+          else
+            dlg:modify{ id = "status_lbl", text = "Incompatible bridge protocol" }
+            pcall(function() state.ws:close() end)
+          end
+        elseif not state.authenticated then
+          pcall(function() state.ws:close() end)
+        elseif req.id and req.command and handlers[req.command] then
           local success, resultOrErr = pcall(handlers[req.command], req.params or {})
           local response = { id = req.id, success = success }
           if success then
@@ -2144,12 +3191,21 @@ local function hookSpriteEvents(spr)
   local listenerCode = spr.events:on('change', function(ev)
     if not state.isExecutingMcp then
       state.revision = state.revision + 1
-      if state.ws then
+      recordChange(
+        state.revision,
+        "external",
+        0,
+        JSON_NULL,
+        true,
+        ev and ev.fromUndo and "external_undo" or "external_edit"
+      )
+      if state.ws and state.authenticated then
         pcall(function()
           state.ws:sendText(bridgeJson.encode({
             event = "revision_changed",
             data = {
               revision = state.revision,
+              sessionId = state.sessionId,
               fromUndo = ev and ev.fromUndo or false
             }
           }))
@@ -2164,24 +3220,71 @@ end
 state.sitechangeListenerId = app.events:on('sitechange', function()
   if app.sprite then
     hookSpriteEvents(app.sprite)
-    if state.ws then
-      pcall(function()
-        state.ws:sendText(bridgeJson.encode({
-          event = "sprite_switched",
-          data = {
-            activeSprite = {
-              filename = app.sprite.filename,
-              width = app.sprite.width,
-              height = app.sprite.height
+    local spriteId = tostring(app.sprite.id or app.sprite.filename or app.sprite)
+    local frameNumber = app.frame and app.frame.frameNumber or 1
+    local layerId = app.layer and tostring(app.layer.id or app.layer.name or app.layer) or ""
+
+    if state.ws and state.authenticated then
+      if state.lastSpriteId ~= spriteId then
+        pcall(function()
+          state.ws:sendText(bridgeJson.encode({
+            event = "sprite_switched",
+            data = {
+              revision = state.revision,
+              sessionId = state.sessionId,
+              activeSprite = {
+                filename = app.sprite.filename,
+                width = app.sprite.width,
+                height = app.sprite.height,
+                colorMode = tostring(app.sprite.colorMode),
+                layerCount = #app.sprite.layers,
+                frameCount = #app.sprite.frames,
+                activeLayer = app.layer and app.layer.name or "",
+                activeFrame = frameNumber
+              }
             }
-          }
-        }))
-      end)
+          }))
+        end)
+      else
+        if state.lastFrameNumber ~= frameNumber then
+          pcall(function()
+            state.ws:sendText(bridgeJson.encode({
+              event = "frame_changed",
+              data = {
+                revision = state.revision,
+                sessionId = state.sessionId,
+                activeFrame = frameNumber
+              }
+            }))
+          end)
+        end
+        if state.lastLayerId ~= layerId then
+          pcall(function()
+            state.ws:sendText(bridgeJson.encode({
+              event = "layer_changed",
+              data = {
+                revision = state.revision,
+                sessionId = state.sessionId,
+                activeLayer = app.layer and app.layer.name or ""
+              }
+            }))
+          end)
+        end
+      end
     end
+
+    state.lastSpriteId = spriteId
+    state.lastFrameNumber = frameNumber
+    state.lastLayerId = layerId
   end
 end)
 
-if app.sprite then hookSpriteEvents(app.sprite) end
+if app.sprite then
+  hookSpriteEvents(app.sprite)
+  state.lastSpriteId = tostring(app.sprite.id or app.sprite.filename or app.sprite)
+  state.lastFrameNumber = app.frame and app.frame.frameNumber or 1
+  state.lastLayerId = app.layer and tostring(app.layer.id or app.layer.name or app.layer) or ""
+end
 
 -- Launch bridge
 initBridge()

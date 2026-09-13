@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
+import { bridgeToolError, bridgeToolResult, confirmationError } from "./common.js";
 
 export function registerLayerTools(
   server: McpServer,
@@ -31,12 +32,12 @@ export function registerLayerTools(
     {
       name: z.string().describe("New layer name"),
       parentGroup: z.string().optional().describe("Optional parent group folder name"),
+      returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {
       try {
         const res = await dispatcher.send<any>("create_layer", params, 10000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        return { content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }] };
+        return bridgeToolResult(res, stateTracker, params.returnPreview);
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
       }
@@ -50,12 +51,12 @@ export function registerLayerTools(
     {
       oldName: z.string().describe("Current layer name"),
       newName: z.string().describe("New layer name"),
+      returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {
       try {
         const res = await dispatcher.send<any>("rename_layer", params, 5000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        return { content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }] };
+        return bridgeToolResult(res, stateTracker, params.returnPreview);
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
       }
@@ -69,6 +70,7 @@ export function registerLayerTools(
     {
       name: z.string().describe("Layer name to delete"),
       confirm: z.boolean().describe("Explicit confirmation to delete (must be true)"),
+      returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {
       if (!params.confirm) {
@@ -79,8 +81,7 @@ export function registerLayerTools(
       }
       try {
         const res = await dispatcher.send<any>("delete_layer", params, 10000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        return { content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }] };
+        return bridgeToolResult(res, stateTracker, params.returnPreview);
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
       }
@@ -111,12 +112,12 @@ export function registerLayerTools(
     {
       name: z.string().describe("Layer name"),
       visible: z.boolean().describe("true to show, false to hide"),
+      returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {
       try {
         const res = await dispatcher.send<any>("set_layer_visibility", params, 5000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        return { content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }] };
+        return bridgeToolResult(res, stateTracker, params.returnPreview);
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
       }
@@ -130,12 +131,12 @@ export function registerLayerTools(
     {
       name: z.string().describe("Layer name"),
       opacity: z.number().int().min(0).max(255).describe("Opacity value (0 = transparent, 255 = fully opaque)"),
+      returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {
       try {
         const res = await dispatcher.send<any>("set_layer_opacity", params, 5000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        return { content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }] };
+        return bridgeToolResult(res, stateTracker, params.returnPreview);
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
       }
@@ -149,12 +150,12 @@ export function registerLayerTools(
     {
       name: z.string().describe("Layer name to move"),
       targetIndex: z.number().int().min(0).describe("Destination stack index"),
+      returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {
       try {
         const res = await dispatcher.send<any>("move_layer", params, 5000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        return { content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }] };
+        return bridgeToolResult(res, stateTracker, params.returnPreview);
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
       }
@@ -167,15 +168,73 @@ export function registerLayerTools(
     "Creates a folder layer group for organizing layers.",
     {
       name: z.string().describe("Group folder name"),
+      parentGroup: z.string().optional().describe("Optional parent group folder name"),
+      returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {
       try {
         const res = await dispatcher.send<any>("create_group", params, 5000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        return { content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }] };
+        return bridgeToolResult(res, stateTracker, params.returnPreview);
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
       }
     }
   );
+
+  server.tool("list_layer_tree", "Lists the complete recursive layer/group hierarchy with stable UUIDs and local stack indexes.", {}, async () => {
+    try { return bridgeToolResult(await dispatcher.send("list_layer_tree", {}, 5000), stateTracker); }
+    catch (error) { return bridgeToolError(error); }
+  });
+
+  server.tool("move_layer_to_group", "Moves a layer or group to a target group, or to the sprite root when parentGroup is omitted.", {
+    name: z.string().min(1).max(128),
+    parentGroup: z.string().min(1).max(128).optional(),
+    targetIndex: z.number().int().positive().optional().describe("1-based index within the new parent"),
+    returnPreview: z.boolean().optional().default(false),
+  }, async (params) => {
+    try { return bridgeToolResult(await dispatcher.send("move_layer_to_group", params, 10000), stateTracker, params.returnPreview); }
+    catch (error) { return bridgeToolError(error); }
+  });
+
+  server.tool("ungroup_layer", "Dissolves a group while preserving and reparenting all of its children.", {
+    name: z.string().min(1).max(128),
+    returnPreview: z.boolean().optional().default(false),
+  }, async (params) => {
+    try { return bridgeToolResult(await dispatcher.send("ungroup_layer", params, 10000), stateTracker, params.returnPreview); }
+    catch (error) { return bridgeToolError(error); }
+  });
+
+  server.tool("set_layer_blend_mode", "Sets the blend mode of a non-group image or tilemap layer.", {
+    name: z.string().min(1).max(128).optional(),
+    layerIndex: z.number().int().min(0).optional(),
+    blendMode: z.enum([
+      "normal", "src", "multiply", "screen", "overlay", "darken", "lighten",
+      "color_dodge", "color_burn", "hard_light", "soft_light", "difference", "exclusion",
+      "hsl_hue", "hsl_saturation", "hsl_color", "hsl_luminosity", "addition", "subtract", "divide",
+    ]),
+    returnPreview: z.boolean().optional().default(false),
+  }, async (params) => {
+    try { return bridgeToolResult(await dispatcher.send("set_layer_blend_mode", params, 10000), stateTracker, params.returnPreview); }
+    catch (error) { return bridgeToolError(error); }
+  });
+
+  server.tool("merge_down_layer", "Merges an image layer with the layer directly below it. Requires confirmation.", {
+    name: z.string().min(1).max(128).optional(),
+    layerIndex: z.number().int().min(0).optional(),
+    confirm: z.boolean(),
+    returnPreview: z.boolean().optional().default(false),
+  }, async (params) => {
+    if (!params.confirm) return confirmationError("merge_down_layer");
+    try { return bridgeToolResult(await dispatcher.send("merge_down_layer", params, 15000), stateTracker, params.returnPreview); }
+    catch (error) { return bridgeToolError(error); }
+  });
+
+  server.tool("flatten_layers", "Flattens every layer into one composited image layer. Requires confirmation.", {
+    confirm: z.boolean(),
+    returnPreview: z.boolean().optional().default(false),
+  }, async (params) => {
+    if (!params.confirm) return confirmationError("flatten_layers");
+    try { return bridgeToolResult(await dispatcher.send("flatten_layers", params, 15000), stateTracker, params.returnPreview); }
+    catch (error) { return bridgeToolError(error); }
+  });
 }

@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
+import { bridgeToolError, bridgeToolResult } from "./common.js";
 
 export function registerPaletteTools(
   server: McpServer,
@@ -31,15 +32,13 @@ export function registerPaletteTools(
     {
       index: z.number().int().min(0).max(255).describe("Palette color index (0-255)"),
       color: z.string().describe("New hex color e.g. #FF0000FF"),
+      returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {
       try {
         const res = await dispatcher.send<any>("set_palette_color", params, 5000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        return { content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }] };
-      } catch (err: any) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
-      }
+        return bridgeToolResult(res, stateTracker, params.returnPreview);
+      } catch (error) { return bridgeToolError(error); }
     }
   );
 

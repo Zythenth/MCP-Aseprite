@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
+import { bridgeToolError, bridgeToolResult } from "./common.js";
 
 export function registerShapeTools(
   server: McpServer,
@@ -28,15 +29,9 @@ export function registerShapeTools(
     async (params) => {
       try {
         const res = await dispatcher.send<any>("draw_line", params, 10000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        const content: any[] = [];
-        if (params.returnPreview && res.pngBase64) {
-          content.push({ type: "image" as const, data: res.pngBase64, mimeType: "image/png" });
-        }
-        content.push({ type: "text" as const, text: JSON.stringify(res, null, 2) });
-        return { content };
-      } catch (err: any) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+        return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
+      } catch (err: unknown) {
+        return bridgeToolError(err);
       }
     }
   );
@@ -60,15 +55,9 @@ export function registerShapeTools(
     async (params) => {
       try {
         const res = await dispatcher.send<any>("draw_rectangle", params, 10000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        const content: any[] = [];
-        if (params.returnPreview && res.pngBase64) {
-          content.push({ type: "image" as const, data: res.pngBase64, mimeType: "image/png" });
-        }
-        content.push({ type: "text" as const, text: JSON.stringify(res, null, 2) });
-        return { content };
-      } catch (err: any) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+        return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
+      } catch (err: unknown) {
+        return bridgeToolError(err);
       }
     }
   );
@@ -92,15 +81,9 @@ export function registerShapeTools(
     async (params) => {
       try {
         const res = await dispatcher.send<any>("draw_ellipse", params, 10000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        const content: any[] = [];
-        if (params.returnPreview && res.pngBase64) {
-          content.push({ type: "image" as const, data: res.pngBase64, mimeType: "image/png" });
-        }
-        content.push({ type: "text" as const, text: JSON.stringify(res, null, 2) });
-        return { content };
-      } catch (err: any) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+        return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
+      } catch (err: unknown) {
+        return bridgeToolError(err);
       }
     }
   );
@@ -122,15 +105,9 @@ export function registerShapeTools(
     async (params) => {
       try {
         const res = await dispatcher.send<any>("flood_fill", params, 15000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        const content: any[] = [];
-        if (params.returnPreview && res.pngBase64) {
-          content.push({ type: "image" as const, data: res.pngBase64, mimeType: "image/png" });
-        }
-        content.push({ type: "text" as const, text: JSON.stringify(res, null, 2) });
-        return { content };
-      } catch (err: any) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+        return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
+      } catch (err: unknown) {
+        return bridgeToolError(err);
       }
     }
   );
@@ -150,15 +127,9 @@ export function registerShapeTools(
     async (params) => {
       try {
         const res = await dispatcher.send<any>("replace_color", params, 15000);
-        if (typeof res.revision === "number") stateTracker.setRevision(res.revision);
-        const content: any[] = [];
-        if (params.returnPreview && res.pngBase64) {
-          content.push({ type: "image" as const, data: res.pngBase64, mimeType: "image/png" });
-        }
-        content.push({ type: "text" as const, text: JSON.stringify(res, null, 2) });
-        return { content };
-      } catch (err: any) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+        return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
+      } catch (err: unknown) {
+        return bridgeToolError(err);
       }
     }
   );
@@ -172,7 +143,21 @@ export function registerShapeTools(
     },
     async (params) => {
       try {
-        const res = await dispatcher.send<any>("get_changes_since", params, 10000);
+        const res = await dispatcher.send<any>(
+          "get_changes_since",
+          { ...params, sessionId: stateTracker.getSessionId() },
+          10000
+        );
+        if (typeof res.currentRevision === "number") stateTracker.setRevision(res.currentRevision);
+        if (
+          res.resyncRequired === false &&
+          res.gap === false &&
+          res.fullRefreshRequired !== true &&
+          typeof res.sessionId === "string" &&
+          typeof res.currentRevision === "number"
+        ) {
+          stateTracker.markSynchronized(res.sessionId, res.currentRevision);
+        }
         return {
           content: [{ type: "text" as const, text: JSON.stringify(res, null, 2) }],
         };

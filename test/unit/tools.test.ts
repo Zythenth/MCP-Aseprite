@@ -176,8 +176,12 @@ describe("Aseprite Tools & Mock Engine Execution", () => {
       changed: false,
       sinceRevision: engine.revision,
       currentRevision: engine.revision,
+      sessionId: engine.sessionId,
+      resyncRequired: false,
+      gap: false,
       pixelsChanged: 0,
       bounds: null,
+      changes: [],
     });
   });
 
@@ -222,7 +226,7 @@ describe("Aseprite Tools & Mock Engine Execution", () => {
 
     const recentDiff = engine.executeCommand("get_changes_since", { sinceRevision: engine.revision - 10 });
     expect(recentDiff.changed).toBe(true);
-    expect(recentDiff.fullRefreshRequired).toBeUndefined();
+    expect(recentDiff.fullRefreshRequired).toBe(false);
     expect(recentDiff.pixelsChanged).toBe(10);
   });
 
