@@ -15,6 +15,7 @@ export declare class MockClient {
     private shouldRun;
     private reconnectTimer;
     private isConnectedState;
+    private readonly sessionId;
     constructor(engine: MockAsepriteEngine, options?: MockClientOptions);
     isConnected(): boolean;
     connect(): Promise<void>;

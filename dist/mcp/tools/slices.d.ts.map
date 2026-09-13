@@ -1,0 +1,1 @@
+{"version":3,"file":"slices.d.ts","sourceRoot":"","sources":["../../../src/mcp/tools/slices.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,SAAS,EAAE,MAAM,yCAAyC,CAAC;AAEpE,OAAO,KAAK,EAAE,iBAAiB,EAAE,MAAM,4BAA4B,CAAC;AACpE,OAAO,KAAK,EAAE,WAAW,EAAE,MAAM,uBAAuB,CAAC;AAUzD,wBAAgB,kBAAkB,CAAC,MAAM,EAAE,SAAS,EAAE,UAAU,EAAE,iBAAiB,EAAE,KAAK,EAAE,WAAW,GAAG,IAAI,CAqC7G"}

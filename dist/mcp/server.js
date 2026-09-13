@@ -11,13 +11,25 @@ import { registerShapeTools } from "./tools/shapes.js";
 import { registerLayerTools } from "./tools/layers.js";
 import { registerFrameTools } from "./tools/frames.js";
 import { registerPaletteTools } from "./tools/palette.js";
+import { registerCelTools } from "./tools/cels.js";
+import { registerSliceTools } from "./tools/slices.js";
+import { registerSelectionTools } from "./tools/selection.js";
+import { registerTileTools } from "./tools/tiles.js";
+import { registerAnimationInspectionTools } from "./tools/animation.js";
+import { registerPixelArtTools } from "./tools/pixelArt.js";
+import { registerReviewTools } from "./tools/review.js";
+import { ReviewState } from "./reviewState.js";
+import { createPolicyToolRegistrar } from "./toolPolicy.js";
 import { registerMcpResources } from "./resources/index.js";
 import { PIXEL_ART_WORKFLOW_INSTRUCTIONS } from "./instructions.js";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
-export function createMcpServer(dispatcher, stateTracker) {
+export function createMcpServer(dispatcher, stateTracker, options = {}) {
     const activeDispatcher = dispatcher || new CommandDispatcher();
     const activeStateTracker = stateTracker || new BridgeState();
+    const reviewState = new ReviewState();
+    const readOnly = options.readOnly ?? config.readOnly;
+    const enabledToolsets = new Set(options.toolsets ?? [...config.toolsets]);
     const server = new McpServer({
         name: config.serverName,
         version: config.serverVersion,
@@ -28,15 +40,37 @@ export function createMcpServer(dispatcher, stateTracker) {
         },
         instructions: PIXEL_ART_WORKFLOW_INSTRUCTIONS,
     });
+    const toolRegistrar = createPolicyToolRegistrar(server, readOnly);
     // Register Core and Specialized Tools
-    registerStatusTool(server, activeDispatcher, activeStateTracker);
-    registerVisualTools(server, activeDispatcher, activeStateTracker);
-    registerEditingTools(server, activeDispatcher, activeStateTracker);
-    registerFileTools(server, activeDispatcher, activeStateTracker);
-    registerShapeTools(server, activeDispatcher, activeStateTracker);
-    registerLayerTools(server, activeDispatcher, activeStateTracker);
-    registerFrameTools(server, activeDispatcher, activeStateTracker);
-    registerPaletteTools(server, activeDispatcher, activeStateTracker);
+    registerStatusTool(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("visual"))
+        registerVisualTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("editing"))
+        registerEditingTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("files"))
+        registerFileTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("shapes"))
+        registerShapeTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("layers"))
+        registerLayerTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("frames"))
+        registerFrameTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("palette"))
+        registerPaletteTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("cels"))
+        registerCelTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("slices"))
+        registerSliceTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("selection"))
+        registerSelectionTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("tiles"))
+        registerTileTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("animation"))
+        registerAnimationInspectionTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("pixel-art"))
+        registerPixelArtTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);
+    if (enabledToolsets.has("review"))
+        registerReviewTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);
     // Register MCP Resources
     registerMcpResources(server, activeDispatcher, activeStateTracker);
     return server;

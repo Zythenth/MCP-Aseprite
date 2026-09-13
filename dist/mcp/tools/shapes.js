@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { bridgeToolError, bridgeToolResult } from "./common.js";
 export function registerShapeTools(server, dispatcher, stateTracker) {
     // 1. draw_line
     server.tool("draw_line", "Draws a pixel art line from (x1, y1) to (x2, y2) using Bresenham's algorithm in a single undo transaction.", {
@@ -15,17 +16,10 @@ export function registerShapeTools(server, dispatcher, stateTracker) {
     }, async (params) => {
         try {
             const res = await dispatcher.send("draw_line", params, 10000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            const content = [];
-            if (params.returnPreview && res.pngBase64) {
-                content.push({ type: "image", data: res.pngBase64, mimeType: "image/png" });
-            }
-            content.push({ type: "text", text: JSON.stringify(res, null, 2) });
-            return { content };
+            return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
         }
         catch (err) {
-            return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+            return bridgeToolError(err);
         }
     });
     // 2. draw_rectangle
@@ -43,17 +37,10 @@ export function registerShapeTools(server, dispatcher, stateTracker) {
     }, async (params) => {
         try {
             const res = await dispatcher.send("draw_rectangle", params, 10000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            const content = [];
-            if (params.returnPreview && res.pngBase64) {
-                content.push({ type: "image", data: res.pngBase64, mimeType: "image/png" });
-            }
-            content.push({ type: "text", text: JSON.stringify(res, null, 2) });
-            return { content };
+            return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
         }
         catch (err) {
-            return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+            return bridgeToolError(err);
         }
     });
     // 3. draw_ellipse
@@ -71,17 +58,10 @@ export function registerShapeTools(server, dispatcher, stateTracker) {
     }, async (params) => {
         try {
             const res = await dispatcher.send("draw_ellipse", params, 10000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            const content = [];
-            if (params.returnPreview && res.pngBase64) {
-                content.push({ type: "image", data: res.pngBase64, mimeType: "image/png" });
-            }
-            content.push({ type: "text", text: JSON.stringify(res, null, 2) });
-            return { content };
+            return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
         }
         catch (err) {
-            return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+            return bridgeToolError(err);
         }
     });
     // 4. flood_fill
@@ -97,17 +77,10 @@ export function registerShapeTools(server, dispatcher, stateTracker) {
     }, async (params) => {
         try {
             const res = await dispatcher.send("flood_fill", params, 15000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            const content = [];
-            if (params.returnPreview && res.pngBase64) {
-                content.push({ type: "image", data: res.pngBase64, mimeType: "image/png" });
-            }
-            content.push({ type: "text", text: JSON.stringify(res, null, 2) });
-            return { content };
+            return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
         }
         catch (err) {
-            return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+            return bridgeToolError(err);
         }
     });
     // 5. replace_color
@@ -121,17 +94,10 @@ export function registerShapeTools(server, dispatcher, stateTracker) {
     }, async (params) => {
         try {
             const res = await dispatcher.send("replace_color", params, 15000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            const content = [];
-            if (params.returnPreview && res.pngBase64) {
-                content.push({ type: "image", data: res.pngBase64, mimeType: "image/png" });
-            }
-            content.push({ type: "text", text: JSON.stringify(res, null, 2) });
-            return { content };
+            return bridgeToolResult(res, stateTracker, params.returnPreview ?? false);
         }
         catch (err) {
-            return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+            return bridgeToolError(err);
         }
     });
     // 6. get_changes_since
@@ -139,7 +105,16 @@ export function registerShapeTools(server, dispatcher, stateTracker) {
         sinceRevision: z.number().int().nonnegative().describe("Base revision to diff against"),
     }, async (params) => {
         try {
-            const res = await dispatcher.send("get_changes_since", params, 10000);
+            const res = await dispatcher.send("get_changes_since", { ...params, sessionId: stateTracker.getSessionId() }, 10000);
+            if (typeof res.currentRevision === "number")
+                stateTracker.setRevision(res.currentRevision);
+            if (res.resyncRequired === false &&
+                res.gap === false &&
+                res.fullRefreshRequired !== true &&
+                typeof res.sessionId === "string" &&
+                typeof res.currentRevision === "number") {
+                stateTracker.markSynchronized(res.sessionId, res.currentRevision);
+            }
             return {
                 content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
             };

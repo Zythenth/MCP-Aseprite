@@ -2,6 +2,7 @@ import { z } from "zod";
 import { decodePngBase64Sync, encodeRgbaToPngBase64 } from "../../image/png.js";
 import { scaleNearestNeighbor } from "../../image/scaling.js";
 import { MAX_PIXELS_BATCH } from "../../config.js";
+import { bridgeToolError, bridgeToolResult } from "./common.js";
 export function registerEditingTools(server, dispatcher, stateTracker) {
     // 1. set_pixels (PRIMARY DRAWING TOOL)
     server.tool("set_pixels", "PRIMARY DRAWING TOOL: Paints tens to thousands of pixels in a single batch operation and single atomic undo step. Returns modified count, affected bounding box, and optional updated preview.", {
@@ -139,57 +140,21 @@ export function registerEditingTools(server, dispatcher, stateTracker) {
         }
     });
     // 4. undo
-    server.tool("undo", "Undoes the most recent editing tool call or transaction on the active sprite.", {}, async () => {
+    server.tool("undo", "Undoes the most recent editing tool call or transaction on the active sprite.", { returnPreview: z.boolean().optional().default(false) }, async (params) => {
         try {
-            const res = await dispatcher.send("undo", {}, 5000);
-            if (typeof res.revision === "number") {
-                stateTracker.setRevision(res.revision);
-            }
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: JSON.stringify({
-                            success: true,
-                            message: "Undo executed successfully",
-                            revision: res.revision,
-                        }, null, 2),
-                    },
-                ],
-            };
+            return bridgeToolResult(await dispatcher.send("undo", params, 5000), stateTracker, params.returnPreview);
         }
-        catch (err) {
-            return {
-                content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }],
-                isError: true,
-            };
+        catch (error) {
+            return bridgeToolError(error);
         }
     });
     // 5. redo
-    server.tool("redo", "Redoes the most recently undone editing operation on the active sprite.", {}, async () => {
+    server.tool("redo", "Redoes the most recently undone editing operation on the active sprite.", { returnPreview: z.boolean().optional().default(false) }, async (params) => {
         try {
-            const res = await dispatcher.send("redo", {}, 5000);
-            if (typeof res.revision === "number") {
-                stateTracker.setRevision(res.revision);
-            }
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: JSON.stringify({
-                            success: true,
-                            message: "Redo executed successfully",
-                            revision: res.revision,
-                        }, null, 2),
-                    },
-                ],
-            };
+            return bridgeToolResult(await dispatcher.send("redo", params, 5000), stateTracker, params.returnPreview);
         }
-        catch (err) {
-            return {
-                content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }],
-                isError: true,
-            };
+        catch (error) {
+            return bridgeToolError(error);
         }
     });
 }

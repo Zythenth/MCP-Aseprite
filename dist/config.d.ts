@@ -1,4 +1,5 @@
 import { getAllowedRoots } from "./security/fileAccess.js";
+import { BRIDGE_PROTOCOL_VERSION } from "./bridge/protocol.js";
 export declare const DEFAULT_PORT = 32123;
 export declare const DEFAULT_WS_PORT = 32123;
 export declare const DEFAULT_HOST = "127.0.0.1";
@@ -16,6 +17,7 @@ export declare const RULER_LEFT_WIDTH_PX = 24;
 export declare const CHECKERBOARD_CELL_SIZE = 8;
 export declare const MAX_CANVAS_DIMENSION = 4096;
 export declare const MAX_PIXELS_BATCH = 100000;
+export declare const MAX_TILESET_PIXELS = 16777216;
 export declare const MAX_BRIDGE_PAYLOAD_BYTES: number;
 export declare const MAX_PENDING_COMMANDS = 128;
 export declare const COMPACT_PALETTE_CHARACTERS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -23,6 +25,7 @@ export declare const COMPACT_TRANSPARENT_CHAR = ".";
 export declare const SERVER_NAME = "aseprite-mcp";
 export declare const SERVER_VERSION = "0.1.0";
 export declare const MCP_PROTOCOL_VERSION = "2024-11-05";
+export { BRIDGE_PROTOCOL_VERSION };
 export declare const MIN_PORT = 1024;
 export declare const MAX_PORT = 65535;
 /**
@@ -48,6 +51,10 @@ export declare function parsePort(val: string | undefined, defaultVal?: number):
  */
 export declare function parseCommandTimeout(val: string | undefined, defaultVal?: number): number;
 export declare const BRIDGE_TOKEN_REGEX: RegExp;
+export declare const TOOLSETS: readonly ["core", "visual", "editing", "files", "shapes", "layers", "frames", "palette", "cels", "slices", "selection", "tiles", "animation", "pixel-art", "review"];
+export type Toolset = typeof TOOLSETS[number];
+export declare function parseBooleanEnv(name: string, value: string | undefined, defaultValue?: boolean): boolean;
+export declare function parseToolsets(value: string | undefined): Toolset[];
 export declare function parseBridgeToken(val: string | undefined): string | undefined;
 export declare function resolvePortEnv(): string | undefined;
 export declare const PORT: number;
@@ -55,12 +62,16 @@ export declare const HOST: string;
 export declare const COMMAND_TIMEOUT_MS: number;
 export declare const ALLOWED_PATHS: string[];
 export declare const BRIDGE_TOKEN: string | undefined;
+export declare const READ_ONLY: boolean;
+export declare const ENABLED_TOOLSETS: ("core" | "visual" | "editing" | "files" | "shapes" | "layers" | "frames" | "palette" | "cels" | "slices" | "selection" | "tiles" | "animation" | "pixel-art" | "review")[];
 export declare const config: {
     readonly port: number;
     readonly host: string;
     readonly commandTimeoutMs: number;
     readonly heavyCommandTimeoutMs: 15000;
     readonly bridgeToken: string | undefined;
+    readonly readOnly: boolean;
+    readonly toolsets: ("core" | "visual" | "editing" | "files" | "shapes" | "layers" | "frames" | "palette" | "cels" | "slices" | "selection" | "tiles" | "animation" | "pixel-art" | "review")[];
     readonly wsHeartbeatIntervalMs: 15000;
     readonly wsHeartbeatTimeoutMs: 30000;
     readonly defaultScale: 8;
@@ -73,6 +84,7 @@ export declare const config: {
     readonly checkerboardCellSize: 8;
     readonly maxCanvasDimension: 4096;
     readonly maxPixelsBatch: 100000;
+    readonly maxTilesetPixels: 16777216;
     readonly maxBridgePayloadBytes: number;
     readonly maxPendingCommands: 128;
     readonly compactPaletteChars: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -81,6 +93,7 @@ export declare const config: {
     readonly serverName: "aseprite-mcp";
     readonly serverVersion: "0.1.0";
     readonly protocolVersion: "2024-11-05";
+    readonly bridgeProtocolVersion: "1.0.0";
 };
 export { getAllowedRoots };
 //# sourceMappingURL=config.d.ts.map

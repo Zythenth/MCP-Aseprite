@@ -6,6 +6,14 @@
 export const DEFAULT_BRIDGE_PORT = 32123;
 export const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 export const DEFAULT_COMMAND_TIMEOUT_MS = 8000;
+export const BRIDGE_PROTOCOL_VERSION = "1.0.0";
+export function isBridgeProtocolCompatible(version) {
+    if (typeof version !== "string")
+        return false;
+    const candidate = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+    const current = /^(\d+)\.(\d+)\.(\d+)$/.exec(BRIDGE_PROTOCOL_VERSION);
+    return candidate !== null && current !== null && candidate[1] === current[1];
+}
 export var BridgeErrorCode;
 (function (BridgeErrorCode) {
     BridgeErrorCode["NO_ACTIVE_SPRITE"] = "NO_ACTIVE_SPRITE";

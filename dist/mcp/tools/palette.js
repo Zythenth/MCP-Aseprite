@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { bridgeToolError, bridgeToolResult } from "./common.js";
 export function registerPaletteTools(server, dispatcher, stateTracker) {
     // get_palette
     server.tool("get_palette", "Retrieves all colors in the active sprite's color palette with index, RGBA, and HEX values.", {}, async () => {
@@ -14,15 +15,14 @@ export function registerPaletteTools(server, dispatcher, stateTracker) {
     server.tool("set_palette_color", "Updates the color at a specific palette index.", {
         index: z.number().int().min(0).max(255).describe("Palette color index (0-255)"),
         color: z.string().describe("New hex color e.g. #FF0000FF"),
+        returnPreview: z.boolean().optional().default(false),
     }, async (params) => {
         try {
             const res = await dispatcher.send("set_palette_color", params, 5000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+            return bridgeToolResult(res, stateTracker, params.returnPreview);
         }
-        catch (err) {
-            return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
+        catch (error) {
+            return bridgeToolError(error);
         }
     });
     // find_palette_color

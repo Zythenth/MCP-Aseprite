@@ -8,7 +8,10 @@ export interface PixelJournalEntry {
         y: number;
         width: number;
         height: number;
-    };
+    } | null;
+    scope?: string;
+    fullRefreshRequired?: boolean;
+    reason?: string;
 }
 export interface MockCelBounds {
     x: number;
@@ -21,6 +24,8 @@ export interface MockCel {
     frameNumber: number;
     bounds: MockCelBounds;
     pixels: Uint32Array;
+    opacity?: number;
+    imageId?: string;
 }
 export interface MockLayer {
     index: number;
@@ -29,10 +34,45 @@ export interface MockLayer {
     isEditable: boolean;
     isLocked: boolean;
     opacity: number;
-    blendMode: "normal" | "multiply" | "screen" | "overlay";
+    blendMode: string;
     isGroup: boolean;
     isBackground: boolean;
     parentIndex: number | null;
+    isTilemap?: boolean;
+    tilesetIndex?: number;
+}
+export interface MockSlice {
+    name: string;
+    bounds: MockCelBounds;
+    center: MockCelBounds | null;
+    pivot: {
+        x: number;
+        y: number;
+    } | null;
+    color: string | null;
+    data: string;
+}
+export interface MockTileset {
+    name: string;
+    tileWidth: number;
+    tileHeight: number;
+    baseIndex: number;
+    tiles: Array<{
+        pixels: Uint32Array;
+        color: string | null;
+        data: string;
+    }>;
+}
+export interface MockTilemapCel {
+    layerIndex: number;
+    frameNumber: number;
+    width: number;
+    height: number;
+    origin: {
+        x: number;
+        y: number;
+    };
+    values: Uint32Array;
 }
 export interface MockFrame {
     frameNumber: number;
@@ -63,6 +103,7 @@ export declare function unpackRgba(color: number): {
 export declare function hexToRgba(hex: string): number;
 export declare function rgbaToHex(color: number): string;
 export declare class MockAsepriteEngine {
+    readonly sessionId: `${string}-${string}-${string}-${string}-${string}`;
     hasActiveSprite: boolean;
     filename: string;
     width: number;
@@ -83,17 +124,27 @@ export declare class MockAsepriteEngine {
         from: number;
         to: number;
         color?: string;
+        direction: "forward" | "reverse" | "pingpong" | "pingpong_reverse";
     }>;
+    slices: MockSlice[];
+    selectionPixels: Set<number>;
+    tilesets: MockTileset[];
+    tilemaps: Map<string, MockTilemapCel>;
     mockExistingFiles: Set<string>;
     constructor(width?: number, height?: number);
     reset(width?: number, height?: number): void;
     getOrCreateCel(layerIndex: number, frameNumber: number): MockCel;
     getCelPixel(cel: MockCel, canvasX: number, canvasY: number): number;
     setCelPixel(cel: MockCel, canvasX: number, canvasY: number, color: number): void;
+    private getLayerPixel;
     getCompositeBuffer(frameNumber?: number): Uint32Array;
     exportFramePngBase64(frameNumber?: number, targetLayer?: MockLayer): string;
     resolveTargetLayer(params: Record<string, any>, forWriting?: boolean): MockLayer;
     resolveTargetFrame(rawFrame: any): MockFrame;
+    resolveAnyLayer(params: Record<string, any>, nameKey?: string, indexKey?: string): MockLayer;
+    private recordChange;
+    private finishMutation;
+    private selectionBounds;
     getStatus(): AsepriteStatusResult;
     executeCommand(command: string, params: Record<string, any>): any;
 }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { bridgeToolResult, confirmationError } from "./common.js";
 export function registerFrameTools(server, dispatcher, stateTracker) {
     // list_frames
     server.tool("list_frames", "Lists all animation frames with their frame numbers and durations in milliseconds.", {}, async () => {
@@ -26,12 +27,11 @@ export function registerFrameTools(server, dispatcher, stateTracker) {
     server.tool("create_frame", "Creates a new blank animation frame after the specified frame or at the end.", {
         afterFrame: z.number().int().positive().optional().describe("Insert after this frame number (defaults to end)"),
         duration: z.number().int().positive().optional().default(100).describe("Frame duration in ms (default 100)"),
+        returnPreview: z.boolean().optional().default(false),
     }, async (params) => {
         try {
             const res = await dispatcher.send("create_frame", params, 5000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+            return bridgeToolResult(res, stateTracker, params.returnPreview);
         }
         catch (err) {
             return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
@@ -40,12 +40,11 @@ export function registerFrameTools(server, dispatcher, stateTracker) {
     // duplicate_frame
     server.tool("duplicate_frame", "Duplicates an existing frame and its cels.", {
         frameNumber: z.number().int().positive().describe("Frame number to duplicate (1-indexed)"),
+        returnPreview: z.boolean().optional().default(false),
     }, async (params) => {
         try {
             const res = await dispatcher.send("duplicate_frame", params, 5000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+            return bridgeToolResult(res, stateTracker, params.returnPreview);
         }
         catch (err) {
             return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
@@ -55,15 +54,13 @@ export function registerFrameTools(server, dispatcher, stateTracker) {
     server.tool("delete_frame", "Deletes an animation frame. Requires confirm: true.", {
         frameNumber: z.number().int().positive().describe("Frame number to delete (1-indexed)"),
         confirm: z.boolean().describe("Explicit confirmation to delete (must be true)"),
+        returnPreview: z.boolean().optional().default(false),
     }, async (params) => {
-        if (!params.confirm) {
-            return { content: [{ type: "text", text: JSON.stringify({ success: false, error: "confirm must be true" }, null, 2) }], isError: true };
-        }
+        if (!params.confirm)
+            return confirmationError("delete_frame");
         try {
             const res = await dispatcher.send("delete_frame", params, 5000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+            return bridgeToolResult(res, stateTracker, params.returnPreview);
         }
         catch (err) {
             return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
@@ -73,12 +70,11 @@ export function registerFrameTools(server, dispatcher, stateTracker) {
     server.tool("set_frame_duration", "Sets duration for a frame in milliseconds.", {
         frameNumber: z.number().int().positive().describe("Target frame number"),
         durationMs: z.number().int().positive().describe("Duration in milliseconds"),
+        returnPreview: z.boolean().optional().default(false),
     }, async (params) => {
         try {
             const res = await dispatcher.send("set_frame_duration", params, 5000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+            return bridgeToolResult(res, stateTracker, params.returnPreview);
         }
         catch (err) {
             return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
@@ -90,12 +86,12 @@ export function registerFrameTools(server, dispatcher, stateTracker) {
         fromFrame: z.number().int().positive().describe("Start frame number"),
         toFrame: z.number().int().positive().describe("End frame number"),
         color: z.string().optional().describe("Optional UI color for tag"),
+        direction: z.enum(["forward", "reverse", "pingpong", "pingpong_reverse"]).optional().default("forward").describe("Playback direction for the tag"),
+        returnPreview: z.boolean().optional().default(false),
     }, async (params) => {
         try {
             const res = await dispatcher.send("create_tag", params, 5000);
-            if (typeof res.revision === "number")
-                stateTracker.setRevision(res.revision);
-            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+            return bridgeToolResult(res, stateTracker, params.returnPreview);
         }
         catch (err) {
             return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };

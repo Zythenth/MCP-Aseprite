@@ -1,5 +1,6 @@
 // src/mock/mockClient.ts
 import WebSocket from "ws";
+import { BRIDGE_PROTOCOL_VERSION, } from "../bridge/protocol.js";
 import { logger } from "../logger.js";
 export class MockClient {
     engine;
@@ -11,39 +12,89 @@ export class MockClient {
     shouldRun = false;
     reconnectTimer = null;
     isConnectedState = false;
+    sessionId;
     constructor(engine, options = {}) {
         this.engine = engine;
         this.host = options.host ?? "127.0.0.1";
         this.port = options.port ?? 32123;
         this.autoReconnect = options.autoReconnect ?? false;
         this.token = options.token;
+        this.sessionId = engine.sessionId;
     }
     isConnected() {
         return this.isConnectedState && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
     }
     async connect() {
         this.shouldRun = true;
-        let url = `ws://${this.host}:${this.port}`;
-        if (this.token) {
-            url += `/?token=${encodeURIComponent(this.token)}`;
-        }
+        const url = `ws://${this.host}:${this.port}`;
         return new Promise((resolve, reject) => {
             let resolved = false;
+            const handshakeTimer = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    this.ws?.terminate();
+                    reject(new Error(`Timed out waiting for bridge hello acknowledgement from ${this.host}:${this.port}`));
+                }
+            }, 6000);
+            const resolveOnce = () => {
+                if (resolved)
+                    return;
+                resolved = true;
+                clearTimeout(handshakeTimer);
+                resolve();
+            };
+            const rejectOnce = (error) => {
+                if (resolved)
+                    return;
+                resolved = true;
+                clearTimeout(handshakeTimer);
+                reject(error);
+            };
             try {
                 this.ws = new WebSocket(url);
             }
             catch (err) {
-                return reject(err);
+                rejectOnce(err instanceof Error ? err : new Error(String(err)));
+                return;
             }
             this.ws.on("open", () => {
-                this.isConnectedState = true;
-                logger.info(`[MockClient] Connected to ${this.host}:${this.port}`);
-                if (!resolved) {
-                    resolved = true;
-                    resolve();
-                }
+                const hello = {
+                    event: "hello",
+                    data: {
+                        bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
+                        asepriteVersion: "mock",
+                        apiVersion: 0,
+                        sessionId: this.sessionId,
+                        revision: this.engine.revision,
+                        token: this.token,
+                        capabilities: {
+                            mock: true,
+                            changeJournal: true,
+                        },
+                    },
+                };
+                this.ws?.send(JSON.stringify(hello));
             });
             this.ws.on("message", (raw) => {
+                if (!this.isConnectedState) {
+                    try {
+                        const acknowledgement = JSON.parse(raw.toString());
+                        if (acknowledgement.event === "hello_ack" &&
+                            acknowledgement.data?.bridgeProtocolVersion === BRIDGE_PROTOCOL_VERSION &&
+                            acknowledgement.data?.sessionId === this.sessionId) {
+                            this.isConnectedState = true;
+                            logger.info(`[MockClient] Authenticated with ${this.host}:${this.port}`);
+                            resolveOnce();
+                            return;
+                        }
+                    }
+                    catch {
+                        // The server will close the connection if the handshake is invalid.
+                    }
+                    rejectOnce(new Error("Bridge returned an invalid hello acknowledgement"));
+                    this.ws?.close(1002, "Invalid hello acknowledgement");
+                    return;
+                }
                 this.handleRawMessage(raw);
             });
             this.ws.on("close", (code, reason) => {
@@ -52,8 +103,7 @@ export class MockClient {
                 const reasonStr = reason ? reason.toString() : "";
                 logger.debug(`[MockClient] Disconnected (code: ${code}, reason: ${reasonStr})`);
                 if (!resolved) {
-                    resolved = true;
-                    reject(new Error(`Failed to connect to ${this.host}:${this.port}: connection closed with code ${code}`));
+                    rejectOnce(new Error(`Failed to connect to ${this.host}:${this.port}: connection closed with code ${code}`));
                 }
                 if (this.shouldRun && this.autoReconnect) {
                     this.reconnectTimer = setTimeout(() => {
@@ -65,10 +115,7 @@ export class MockClient {
             });
             this.ws.on("error", (err) => {
                 logger.debug(`[MockClient] Socket error: ${err.message}`);
-                if (!resolved) {
-                    resolved = true;
-                    reject(err);
-                }
+                rejectOnce(err);
             });
         });
     }

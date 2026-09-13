@@ -11,22 +11,28 @@ export interface WsServerOptions {
     pingIntervalMs?: number;
     maxPayload?: number;
     token?: string;
+    handshakeTimeoutMs?: number;
 }
 export declare class BridgeWebSocketServer {
+    private static readonly MAX_PENDING_HANDSHAKES;
     private wss;
     private activeSocket;
+    private readonly pendingHandshakes;
     private heartbeatTimer;
     private readonly host;
     private readonly port;
     private readonly pingIntervalMs;
     private readonly maxPayload;
     private readonly token?;
+    private readonly handshakeTimeoutMs;
     private readonly dispatcher;
     private readonly state;
     constructor(dispatcher: CommandDispatcher, state: BridgeState, options?: WsServerOptions);
     start(): Promise<void>;
     private isLoopbackAddress;
     private handleConnection;
+    private parseHello;
+    private tokensMatch;
     private startHeartbeat;
     close(): Promise<void>;
     isConnected(): boolean;
@@ -36,5 +42,6 @@ export declare function startWsServer(port?: number, host?: string, dispatcher?:
     token?: string;
     pingIntervalMs?: number;
     maxPayload?: number;
+    handshakeTimeoutMs?: number;
 }): Promise<BridgeWebSocketServer>;
 //# sourceMappingURL=wsServer.d.ts.map

@@ -1,4 +1,5 @@
 import { getAllowedRoots } from "./security/fileAccess.js";
+import { BRIDGE_PROTOCOL_VERSION } from "./bridge/protocol.js";
 export const DEFAULT_PORT = 32123;
 export const DEFAULT_WS_PORT = DEFAULT_PORT;
 export const DEFAULT_HOST = "127.0.0.1";
@@ -16,6 +17,7 @@ export const RULER_LEFT_WIDTH_PX = 24;
 export const CHECKERBOARD_CELL_SIZE = 8;
 export const MAX_CANVAS_DIMENSION = 4096;
 export const MAX_PIXELS_BATCH = 100000;
+export const MAX_TILESET_PIXELS = 16_777_216;
 export const MAX_BRIDGE_PAYLOAD_BYTES = 16 * 1024 * 1024;
 export const MAX_PENDING_COMMANDS = 128;
 export const COMPACT_PALETTE_CHARACTERS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -23,6 +25,7 @@ export const COMPACT_TRANSPARENT_CHAR = ".";
 export const SERVER_NAME = "aseprite-mcp";
 export const SERVER_VERSION = "0.1.0";
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
+export { BRIDGE_PROTOCOL_VERSION };
 export const MIN_PORT = 1024;
 export const MAX_PORT = 65535;
 /**
@@ -88,6 +91,29 @@ function sanitizeHost(val, defaultVal) {
     return defaultVal;
 }
 export const BRIDGE_TOKEN_REGEX = /^[A-Za-z0-9._~-]+$/;
+export const TOOLSETS = [
+    "core", "visual", "editing", "files", "shapes", "layers", "frames", "palette",
+    "cels", "slices", "selection", "tiles", "animation", "pixel-art", "review",
+];
+export function parseBooleanEnv(name, value, defaultValue = false) {
+    if (value === undefined || value.trim() === "")
+        return defaultValue;
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized))
+        return true;
+    if (["0", "false", "no", "off"].includes(normalized))
+        return false;
+    throw new Error(`Invalid ${name}: expected one of 1, 0, true, false, yes, no, on, or off.`);
+}
+export function parseToolsets(value) {
+    if (value === undefined || value.trim() === "" || value.trim().toLowerCase() === "all")
+        return [...TOOLSETS];
+    const requested = value.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+    const unknown = requested.filter((entry) => !TOOLSETS.includes(entry));
+    if (unknown.length > 0)
+        throw new Error(`Invalid ASEPRITE_TOOLSETS value(s): ${unknown.join(", ")}.`);
+    return [...new Set(["core", ...requested])];
+}
 export function parseBridgeToken(val) {
     if (val === undefined)
         return undefined;
@@ -118,12 +144,16 @@ export const HOST = sanitizeHost(process.env.ASEPRITE_HOST, DEFAULT_HOST);
 export const COMMAND_TIMEOUT_MS = parseCommandTimeout(process.env.ASEPRITE_COMMAND_TIMEOUT, DEFAULT_COMMAND_TIMEOUT_MS);
 export const ALLOWED_PATHS = getAllowedRoots();
 export const BRIDGE_TOKEN = parseBridgeToken(process.env.ASEPRITE_BRIDGE_TOKEN);
+export const READ_ONLY = parseBooleanEnv("ASEPRITE_READ_ONLY", process.env.ASEPRITE_READ_ONLY);
+export const ENABLED_TOOLSETS = parseToolsets(process.env.ASEPRITE_TOOLSETS);
 export const config = {
     port: PORT,
     host: HOST,
     commandTimeoutMs: COMMAND_TIMEOUT_MS,
     heavyCommandTimeoutMs: HEAVY_COMMAND_TIMEOUT_MS,
     bridgeToken: BRIDGE_TOKEN,
+    readOnly: READ_ONLY,
+    toolsets: ENABLED_TOOLSETS,
     wsHeartbeatIntervalMs: WS_HEARTBEAT_INTERVAL_MS,
     wsHeartbeatTimeoutMs: WS_HEARTBEAT_TIMEOUT_MS,
     defaultScale: DEFAULT_SCALE,
@@ -136,6 +166,7 @@ export const config = {
     checkerboardCellSize: CHECKERBOARD_CELL_SIZE,
     maxCanvasDimension: MAX_CANVAS_DIMENSION,
     maxPixelsBatch: MAX_PIXELS_BATCH,
+    maxTilesetPixels: MAX_TILESET_PIXELS,
     maxBridgePayloadBytes: MAX_BRIDGE_PAYLOAD_BYTES,
     maxPendingCommands: MAX_PENDING_COMMANDS,
     compactPaletteChars: COMPACT_PALETTE_CHARACTERS,
@@ -144,6 +175,7 @@ export const config = {
     serverName: SERVER_NAME,
     serverVersion: SERVER_VERSION,
     protocolVersion: MCP_PROTOCOL_VERSION,
+    bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
 };
 export { getAllowedRoots };
 //# sourceMappingURL=config.js.map

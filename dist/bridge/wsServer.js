@@ -6,17 +6,20 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { timingSafeEqual } from "node:crypto";
 import { logger } from "../logger.js";
-import { DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT } from "./protocol.js";
+import { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, isBridgeProtocolCompatible, } from "./protocol.js";
 import { MAX_BRIDGE_PAYLOAD_BYTES } from "../config.js";
 export class BridgeWebSocketServer {
+    static MAX_PENDING_HANDSHAKES = 8;
     wss = null;
     activeSocket = null;
+    pendingHandshakes = new Set();
     heartbeatTimer = null;
     host;
     port;
     pingIntervalMs;
     maxPayload;
     token;
+    handshakeTimeoutMs;
     dispatcher;
     state;
     constructor(dispatcher, state, options = {}) {
@@ -27,6 +30,7 @@ export class BridgeWebSocketServer {
         this.pingIntervalMs = options.pingIntervalMs || 15000;
         this.maxPayload = options.maxPayload !== undefined ? options.maxPayload : MAX_BRIDGE_PAYLOAD_BYTES;
         this.token = options.token;
+        this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 5000;
     }
     async start() {
         return new Promise((resolve, reject) => {
@@ -71,32 +75,6 @@ export class BridgeWebSocketServer {
             ip === "localhost");
     }
     handleConnection(socket, req) {
-        // Validate token authentication if configured, before loopback, first-client pinning, state, or dispatcher
-        if (this.token) {
-            let authenticated = false;
-            let providedToken = null;
-            if (req.url) {
-                try {
-                    const parsedUrl = new URL(req.url, `http://${this.host}`);
-                    providedToken = parsedUrl.searchParams.get("token");
-                }
-                catch {
-                    // Malformed URL, providedToken remains null
-                }
-            }
-            if (providedToken) {
-                const expectedBuf = Buffer.from(this.token, "utf-8");
-                const providedBuf = Buffer.from(providedToken, "utf-8");
-                if (expectedBuf.length === providedBuf.length) {
-                    authenticated = timingSafeEqual(expectedBuf, providedBuf);
-                }
-            }
-            if (!authenticated) {
-                logger.warn("Rejected unauthorized bridge connection: invalid authentication token");
-                socket.close(1008, "Invalid bridge authentication");
-                return;
-            }
-        }
         const remoteIp = req.socket.remoteAddress;
         // Strict loopback security validation
         if (!this.isLoopbackAddress(remoteIp)) {
@@ -113,23 +91,78 @@ export class BridgeWebSocketServer {
             socket.close(1008, "Another client is already connected");
             return;
         }
-        logger.info(`Bridge connection accepted from ${remoteIp}`);
-        this.activeSocket = socket;
+        if (this.pendingHandshakes.size >= BridgeWebSocketServer.MAX_PENDING_HANDSHAKES) {
+            logger.warn(`Rejected bridge connection from ${remoteIp}: too many pending handshakes`);
+            socket.close(1013, "Too many pending bridge handshakes");
+            return;
+        }
+        logger.debug(`Bridge connection candidate accepted from ${remoteIp}; awaiting hello`);
         socket.isAlive = true;
+        this.pendingHandshakes.add(socket);
+        let promoted = false;
+        let cleanedUp = false;
+        const cleanupCandidate = () => {
+            if (cleanedUp)
+                return;
+            cleanedUp = true;
+            clearTimeout(handshakeTimer);
+            this.pendingHandshakes.delete(socket);
+        };
+        const rejectCandidate = (code, reason) => {
+            cleanupCandidate();
+            logger.warn(`Rejected bridge connection from ${remoteIp}: ${reason}`);
+            socket.close(code, reason);
+        };
+        const handshakeTimer = setTimeout(() => {
+            if (!promoted)
+                rejectCandidate(1008, "Bridge hello timeout");
+        }, this.handshakeTimeoutMs);
         socket.on("pong", () => {
             socket.isAlive = true;
         });
-        this.state.setConnected(true, remoteIp);
-        this.dispatcher.setActiveSocket(socket);
         socket.on("message", (data, isBinary) => {
             if (isBinary) {
-                logger.warn("Received unexpected binary frame over bridge WebSocket; ignoring");
+                if (!promoted) {
+                    rejectCandidate(1003, "Bridge hello must be text JSON");
+                }
+                else {
+                    logger.warn("Received unexpected binary frame over bridge WebSocket; ignoring");
+                }
                 return;
             }
             const raw = data.toString("utf-8");
+            if (!promoted) {
+                const hello = this.parseHello(raw);
+                if (!hello.ok) {
+                    rejectCandidate(hello.code, hello.reason);
+                    return;
+                }
+                if (this.activeSocket && this.activeSocket.readyState === WebSocket.OPEN) {
+                    rejectCandidate(1008, "Another client is already connected");
+                    return;
+                }
+                cleanupCandidate();
+                promoted = true;
+                this.activeSocket = socket;
+                const sync = this.state.handleHello(hello.data);
+                this.state.setConnected(true, remoteIp);
+                this.dispatcher.setActiveSocket(socket);
+                const acknowledgement = {
+                    event: "hello_ack",
+                    data: {
+                        bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
+                        sessionId: hello.data.sessionId,
+                        resyncRequired: sync.resyncRequired,
+                    },
+                };
+                socket.send(JSON.stringify(acknowledgement));
+                logger.info(`Bridge client authenticated from ${remoteIp} (Aseprite ${hello.data.asepriteVersion}, session ${hello.data.sessionId})`);
+                return;
+            }
             this.dispatcher.handleIncomingMessage(raw);
         });
         socket.on("close", (code, reason) => {
+            cleanupCandidate();
             const reasonStr = reason ? reason.toString("utf-8") : "";
             logger.info(`Bridge connection closed (code: ${code}, reason: '${reasonStr || "normal"}')`);
             if (this.activeSocket === socket) {
@@ -139,6 +172,7 @@ export class BridgeWebSocketServer {
             }
         });
         socket.on("error", (err) => {
+            cleanupCandidate();
             logger.error(`Bridge socket error: ${err.message}`);
             if (this.activeSocket === socket) {
                 this.activeSocket = null;
@@ -146,6 +180,72 @@ export class BridgeWebSocketServer {
                 this.dispatcher.clearActiveSocket(`Bridge socket error: ${err.message}`);
             }
         });
+    }
+    parseHello(raw) {
+        let message;
+        try {
+            message = JSON.parse(raw);
+        }
+        catch {
+            return { ok: false, code: 1002, reason: "First message must be a valid bridge hello" };
+        }
+        if (!message || typeof message !== "object" || Array.isArray(message)) {
+            return { ok: false, code: 1002, reason: "First message must be a bridge hello object" };
+        }
+        const envelope = message;
+        if (envelope.event !== "hello" || !envelope.data || typeof envelope.data !== "object" || Array.isArray(envelope.data)) {
+            return { ok: false, code: 1002, reason: "First message must be bridge hello" };
+        }
+        const data = envelope.data;
+        if (!isBridgeProtocolCompatible(data.bridgeProtocolVersion)) {
+            return {
+                ok: false,
+                code: 1002,
+                reason: `Incompatible bridge protocol; server requires ${BRIDGE_PROTOCOL_VERSION}`,
+            };
+        }
+        if (typeof data.asepriteVersion !== "string" || data.asepriteVersion.length < 1 || data.asepriteVersion.length > 64) {
+            return { ok: false, code: 1002, reason: "Invalid Aseprite version in bridge hello" };
+        }
+        if (!Number.isSafeInteger(data.apiVersion) || data.apiVersion < 0) {
+            return { ok: false, code: 1002, reason: "Invalid API version in bridge hello" };
+        }
+        if (typeof data.sessionId !== "string" || data.sessionId.length < 8 || data.sessionId.length > 128) {
+            return { ok: false, code: 1002, reason: "Invalid session identifier in bridge hello" };
+        }
+        if (!Number.isSafeInteger(data.revision) || data.revision < 0) {
+            return { ok: false, code: 1002, reason: "Invalid revision in bridge hello" };
+        }
+        if (!data.capabilities || typeof data.capabilities !== "object" || Array.isArray(data.capabilities)) {
+            return { ok: false, code: 1002, reason: "Invalid capabilities in bridge hello" };
+        }
+        const capabilityEntries = Object.entries(data.capabilities);
+        if (capabilityEntries.length > 64 ||
+            capabilityEntries.some(([name, enabled]) => name.length < 1 || name.length > 64 || typeof enabled !== "boolean")) {
+            return { ok: false, code: 1002, reason: "Invalid capabilities in bridge hello" };
+        }
+        if (this.token && !this.tokensMatch(this.token, data.token)) {
+            return { ok: false, code: 1008, reason: "Invalid bridge authentication" };
+        }
+        return {
+            ok: true,
+            data: {
+                bridgeProtocolVersion: data.bridgeProtocolVersion,
+                asepriteVersion: data.asepriteVersion,
+                apiVersion: data.apiVersion,
+                sessionId: data.sessionId,
+                revision: data.revision,
+                token: typeof data.token === "string" ? data.token : undefined,
+                capabilities: Object.fromEntries(capabilityEntries),
+            },
+        };
+    }
+    tokensMatch(expected, provided) {
+        if (typeof provided !== "string")
+            return false;
+        const expectedBuffer = Buffer.from(expected, "utf-8");
+        const providedBuffer = Buffer.from(provided, "utf-8");
+        return expectedBuffer.length === providedBuffer.length && timingSafeEqual(expectedBuffer, providedBuffer);
     }
     startHeartbeat() {
         if (this.heartbeatTimer)
@@ -174,6 +274,9 @@ export class BridgeWebSocketServer {
             this.activeSocket.terminate();
             this.activeSocket = null;
         }
+        for (const socket of this.pendingHandshakes)
+            socket.terminate();
+        this.pendingHandshakes.clear();
         this.state.setConnected(false);
         this.dispatcher.clearActiveSocket("Server stopping");
         if (this.wss) {
