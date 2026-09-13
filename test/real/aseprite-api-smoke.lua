@@ -87,5 +87,5 @@ check((app.pixelColor.tileF(encodedTile) & 0x80000000) ~= 0, "tile flags decodin
 sprite.selection:deselect()
 sprite:saveAs(output)
 check(app.fs.isFile(output), "real Aseprite did not write the fixture")
-print("ASEPRITE_REAL_SMOKE_OK " .. app.version .. " api=" .. tostring(app.apiVersion))
+print("ASEPRITE_REAL_SMOKE_OK " .. tostring(app.version) .. " api=" .. tostring(app.apiVersion))
 sprite:close()
