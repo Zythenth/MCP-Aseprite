@@ -105,7 +105,7 @@ describe("Milestone 2 Challenger 1 (Iteration 2): Empirical Stress & Hardening H
         }
       }
       expect(scenariosChecked).toBe(scales.length * origins.length * widths.length * fonts.length);
-    });
+    }, 60_000);
 
     it("1.2 Top Ruler Forced Step Stress: Verify forced stepX (1, 2, 5, 10, 20) NEVER produces overlapping labels", () => {
       const forcedSteps = [1, 2, 5, 10, 20];

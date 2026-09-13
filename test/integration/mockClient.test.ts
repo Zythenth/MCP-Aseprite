@@ -79,10 +79,13 @@ describe("MockBridge WebSocket Integration Tests", () => {
 
     // Start a command that we will interrupt with disconnect
     const sendPromise = dispatcher.send("hang_test", {}, 5000);
+    // Attach the rejection handler before closing the socket. On faster CI runners,
+    // the close event can reject in the same turn as stop().
+    const rejection = expect(sendPromise).rejects.toThrow("aborted");
     // Disconnect the mock bridge
     await mockBridge.stop();
     mockBridge = null;
 
-    await expect(sendPromise).rejects.toThrow("aborted");
+    await rejection;
   });
 });
