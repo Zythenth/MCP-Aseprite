@@ -99,6 +99,11 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     // Mock environment variable handling: sets in if ($Mock) and cleans in else branch
     expect(startContent).toMatch(/if\s*\(\$Mock\)\s*\{[\s\S]*?\$env:ASEPRITE_MCP_MOCK\s*=\s*["']1["']/);
     expect(startContent).toMatch(/else\s*\{[\s\S]*?Remove-Item\s+Env:\\ASEPRITE_MCP_MOCK\s+-ErrorAction\s+SilentlyContinue/);
+
+    expect(startContent).toContain("[switch]$ReadOnly");
+    expect(startContent).toContain("[string[]]$Toolsets");
+    expect(startContent).toContain("ASEPRITE_READ_ONLY");
+    expect(startContent).toContain("ASEPRITE_TOOLSETS");
   });
 
   it("README.md does not encourage passing tokens in start.ps1 CLI arguments, uses valid placeholder, and documents save_sprite", () => {
@@ -129,6 +134,32 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     expect(installContent).toContain("npm ci");
     // Ensure InstallLuaToAseprite is used in conditional logic beyond parameter declaration
     expect(installContent).toMatch(/\$shouldInstallScript\s*=\s*\$InstallLuaToAseprite\s+-or/);
+    expect(installContent).toContain("BRIDGE_PROTOCOL_VERSION");
+    expect(installContent).toContain("dist\\bridge\\protocol.js");
+    expect(installContent).not.toContain("src\\bridge\\protocol.ts");
+    expect(installContent).toContain("Get-FileHash");
+    expect(installContent).toContain("SHA-256 verified");
+  });
+
+  it("README documents the complete configurable surface and in-memory review-state limitation", () => {
+    const readmeContent = fs.readFileSync(path.resolve(rootDir, "README.md"), "utf-8");
+    expect(readmeContent).toContain("89 ferramentas");
+    expect(readmeContent).toContain("ASEPRITE_READ_ONLY");
+    expect(readmeContent).toContain("ASEPRITE_TOOLSETS");
+    expect(readmeContent).toContain("export_sprite_sheet");
+    expect(readmeContent).toContain("get_onion_skin");
+    expect(readmeContent).toContain("lint_pixel_art");
+    expect(readmeContent).toMatch(/mantidos apenas em memória/i);
+  });
+
+  it("CI runs the full Node suite and a pinned real-Aseprite smoke matrix", () => {
+    const workflow = fs.readFileSync(path.resolve(rootDir, ".github/workflows/ci.yml"), "utf-8");
+    expect(workflow).toContain("npm test");
+    expect(workflow).toContain("v1.3.18.5");
+    expect(workflow).toContain("test/real/aseprite-api-smoke.lua");
+    expect(workflow).toContain("ubuntu-latest");
+    expect(workflow).toContain("windows-latest");
+    expect(workflow).toContain("macos-latest");
   });
 
   it("lua/aseprite-bridge.lua sanitizes WebSocket error event without tostring(err) to prevent token leakage", () => {

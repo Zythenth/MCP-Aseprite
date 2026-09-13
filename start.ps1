@@ -4,13 +4,34 @@ param(
     [switch]$Mock,
     [int]$Port,
     [string]$BridgeToken,
-    [string[]]$AllowedPaths
+    [string[]]$AllowedPaths,
+    [switch]$ReadOnly,
+    [string[]]$Toolsets
 )
 
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptDir
+
+if ($ReadOnly) {
+    $env:ASEPRITE_READ_ONLY = "1"
+}
+
+if ($PSBoundParameters.ContainsKey('Toolsets')) {
+    if (-not $Toolsets -or $Toolsets.Count -eq 0) {
+        Write-Error "Toolsets was explicitly provided but contains no values."
+        exit 1
+    }
+    $allowedToolsets = @('core','visual','editing','files','shapes','layers','frames','palette','cels','slices','selection','tiles','animation','pixel-art','review')
+    foreach ($toolset in $Toolsets) {
+        if ($allowedToolsets -notcontains $toolset) {
+            Write-Error "Unknown toolset '$toolset'. Allowed values: $($allowedToolsets -join ', ')."
+            exit 1
+        }
+    }
+    $env:ASEPRITE_TOOLSETS = $Toolsets -join ','
+}
 
 # Port resolution logic:
 # 1) If -Port is explicitly provided, validate and set ASEPRITE_PORT.

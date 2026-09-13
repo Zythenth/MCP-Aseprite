@@ -20,9 +20,13 @@ Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 - **Inspeção visual rica**: previews em PNG com escala nearest-neighbor, réguas de coordenadas e grades customizáveis.
 - **Leitura precisa de pixels**: formatos hexadecimal (`#RRGGBBAA`), RGBA, indexado e compacto otimizado para economia de tokens.
 - **Edição em lote e Undo atômico**: operações em lote agrupadas em uma única entrada de histórico de Undo.
-- **Ferramentas completas**: formas geométricas, preenchimento por inundação, substituição de cores, paletas, camadas, frames e tags.
+- **89 ferramentas MCP tipadas**: pixels, formas, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, revisão visual e análise de pixel art.
+- **Estrutura nativa do Aseprite**: cels vinculados, grupos aninhados, pivôs/nine-patch, blend modes, merge/flatten e exportação avançada por tag, intervalo e camada.
+- **Ciclo visual incremental**: preview opcional após mutações, filmstrip, onion skin, comparação exata entre frames, checkpoints e histórico de alterações por revisão.
+- **Qualidade de pixel art**: lint heurístico, CIEDE2000, análise de paleta, rampas com hue shift e dithering Bayer determinístico.
 - **Segurança de arquivos**: contenção estrita de caminhos (`ASEPRITE_ALLOWED_PATHS`), política no-clobber por padrão (`overwrite: true` explícito) e validação de arquivo esperado no salvamento.
-- **Autenticação opcional por token**: proteção contra conexões locais não autorizadas no bridge WebSocket (`ASEPRITE_BRIDGE_TOKEN`).
+- **Bridge autenticável e versionado**: handshake obrigatório, sessão identificada, compatibilidade de protocolo verificada e token opcional (`ASEPRITE_BRIDGE_TOKEN`).
+- **Superfície configurável**: modo somente leitura e seleção de toolsets para reduzir risco e custo de descoberta.
 - **Mock Bridge em memória**: possibilita testes de integração rápidos e headless sem necessidade de abrir a interface do Aseprite.
 - **Transporte padrão stdio**: mensagens de protocolo MCP isoladas em `stdout` e registros de diagnóstico em `stderr`.
 
@@ -35,7 +39,7 @@ Cliente MCP (Gemini / Claude / outros)
     |
     | MCP sobre stdio
     v
-Aseprite MCP Server (Node.js/TypeScript)
+Aseprite MCP Server (Node.js/TypeScript; protocolo bridge 1.x)
     |
     | WebSocket JSON-RPC em 127.0.0.1:32123 (com auth opcional)
     v
@@ -45,7 +49,7 @@ Bridge Lua (aseprite-bridge.lua)
 Documento ativo no Aseprite
 ```
 
-O servidor registra as ferramentas MCP, valida parâmetros de entrada e encaminha comandos em envelopes correlacionados por ID ao bridge Lua. O script executa comandos na API oficial do Aseprite e retorna resultados estruturados.
+O servidor registra as ferramentas MCP, valida parâmetros de entrada e encaminha comandos em envelopes correlacionados por ID ao bridge Lua. Antes de aceitar comandos, servidor e bridge concluem um handshake `hello`/`hello_ack` com versão, sessão, capacidades e revisão. Uma sessão reconectada pode pedir ressincronização e consultar alterações estruturadas desde uma revisão conhecida.
 
 ---
 
@@ -81,7 +85,8 @@ O script `install.ps1`:
 2. Instala as dependências via `npm ci --ignore-scripts --no-audit --no-fund`;
 3. Compila o projeto TypeScript gerando `dist/`;
 4. Executa a suíte de testes (a menos que `-SkipTests` seja informado);
-5. Copia `lua/aseprite-bridge.lua` para `%APPDATA%\Aseprite\scripts` caso o Aseprite seja detectado (ou se `-InstallLuaToAseprite` for fornecido).
+5. Verifica que servidor e bridge declaram a mesma versão de protocolo;
+6. Copia `lua/aseprite-bridge.lua` para `%APPDATA%\Aseprite\scripts` caso o Aseprite seja detectado (ou se `-InstallLuaToAseprite` for fornecido) e confere o SHA-256 da cópia.
 
 ### Instalação manual (Todas as plataformas)
 
@@ -143,6 +148,24 @@ Por padrão, o bridge conecta-se localmente em `127.0.0.1`. Para adicionar uma b
   Após definir, reinicie o Aseprite e o cliente MCP para carregar as novas variáveis.
 - **Validação e Privacidade**: a validação é feita em tempo constante (`crypto.timingSafeEqual`). O token **nunca** é impresso em logs, console, diálogos ou mensagens de erro. A interface do Aseprite exibe apenas `[Auth: enabled]` ou `[Auth: disabled]`.
 - **Aviso**: conexões no loopback e tokens de autenticação mitigam conexões acidentais ou não autorizadas no host local, mas não eliminam todos os riscos em sistemas compartilhados. Se nenhum token for configurado, o servidor emitirá um aviso único na inicialização indicando que a autenticação no loopback está desabilitada.
+
+O token não é colocado na URL. Ele é enviado somente no primeiro envelope de handshake. O servidor fixa o primeiro bridge autenticado e pronto como cliente ativo; conexões candidatas não substituem uma sessão ativa.
+
+### 3. Modo somente leitura e toolsets
+
+- `ASEPRITE_READ_ONLY=1` não registra ferramentas que alteram o sprite ou gravam arquivos. Inspeção, análise e abertura de documento permanecem disponíveis.
+- `ASEPRITE_TOOLSETS` recebe uma lista separada por vírgulas. Valores aceitos: `core`, `visual`, `editing`, `files`, `shapes`, `layers`, `frames`, `palette`, `cels`, `slices`, `selection`, `tiles`, `animation`, `pixel-art` e `review`.
+- `core` (`aseprite_status`) é sempre incluído. O valor ausente, vazio ou `all` ativa todos os conjuntos.
+
+Exemplo enxuto para um agente revisor:
+
+```powershell
+.\start.ps1 -ReadOnly -Toolsets visual,palette,animation,pixel-art,review
+```
+
+### 4. Limites operacionais
+
+O servidor limita payloads do bridge, comandos pendentes, dimensões de canvas, pixels por lote, frames de filmstrip/spritesheet, tamanho do checkpoint e cardinalidade da análise de paleta. Esses limites são proteções contra consumo acidental de memória/CPU; não constituem uma sandbox para processos locais já comprometidos.
 
 ---
 
@@ -213,6 +236,9 @@ No Windows via PowerShell:
 
 # Execução com Mock Bridge (headless, sem Aseprite)
 .\start.ps1 -Mock
+
+# Revisão sem mutações, expondo apenas conjuntos necessários
+.\start.ps1 -ReadOnly -Toolsets visual,palette,animation,pixel-art,review
 ```
 
 > [!TIP]
@@ -221,6 +247,8 @@ No Windows via PowerShell:
 ---
 
 ## Resumo das Ferramentas MCP
+
+O conjunto completo contém **89 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
 
 ### Inspeção Visual e Leitura
 - `aseprite_status`: Estado da conexão, arquivo ativo, tamanho do canvas, camada e frame selecionados e revisão atual.
@@ -238,10 +266,52 @@ No Windows via PowerShell:
 - `flood_fill`, `replace_color`: Preenchimento por tolerância e substituição de cores.
 - `undo`, `redo`: Controle do histórico de edição.
 
-### Camadas, Animação e Arquivos
-- Camadas: `list_layers`, `create_layer`, `rename_layer`, `delete_layer`, `select_layer`, `set_layer_visibility`, `set_layer_opacity`, `move_layer`, `create_group`.
-- Frames e Tags: `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `delete_frame`, `set_frame_duration`, `create_tag`, `list_tags`.
-- Arquivos: `new_sprite`, `open_sprite`, `save_sprite` (salva o arquivo ativo sem parâmetros do usuário, validado internamente via `aseprite_status`), `save_sprite_as` (com `overwrite`), `export_png` (com `overwrite`), `resize_canvas`.
+### Camadas, grupos e composição
+
+- Básico: `list_layers`, `create_layer`, `rename_layer`, `delete_layer`, `select_layer`, `set_layer_visibility`, `set_layer_opacity`, `move_layer`, `create_group`.
+- Hierarquia: `list_layer_tree`, `move_layer_to_group`, `ungroup_layer`.
+- Composição: `set_layer_blend_mode`, `merge_down_layer`, `flatten_layers`.
+
+### Frames, tags e inspeção de animação
+
+- Frames/tags: `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `delete_frame`, `set_frame_duration`, `create_tag`, `list_tags`.
+- Revisão: `get_onion_skin`, `get_filmstrip`, `compare_frames`.
+- Tags aceitam `forward`, `reverse`, `pingpong` e `pingpong_reverse`.
+
+### Cels, slices e seleções
+
+- Cels: `get_cel`, `create_cel`, `delete_cel`, `set_cel_position`, `set_cel_opacity`, `link_cel`, `unlink_cel`.
+- Slices: `list_slices`, `get_slice`, `create_slice`, `update_slice`, `delete_slice`, incluindo centro nine-patch e pivô.
+- Seleção persistente: `get_selection`, `set_selection`, `clear_selection`, `invert_selection`. `set_selection` oferece substituição, união, subtração e interseção retangulares.
+
+### Tilesets e tilemaps
+
+- `list_tilesets`, `create_tileset`, `delete_tileset`, `get_tile`, `set_tile_pixels`.
+- `create_tilemap_layer`, `get_tilemap`, `set_tiles`, incluindo índices e flags de espelhamento X/Y/diagonal.
+
+### Pixel art, checkpoints e waivers
+
+- `lint_pixel_art`: encontra indícios de pixels órfãos, outline interrompido, banding, pillow shading, drift de simetria e seams. Resultados são heurísticos e nunca corrigidos automaticamente.
+- `analyze_palette`, `find_perceptual_palette_color`, `generate_palette_ramp`, `apply_ordered_dither`.
+- `create_review_checkpoint`, `list_review_checkpoints`, `compare_review_checkpoint`, `delete_review_checkpoint`.
+- `add_lint_waiver`, `list_lint_waivers`, `delete_lint_waiver`. Checkpoints e waivers são vinculados à sessão atual e mantidos apenas em memória.
+
+### Arquivos e exportação
+
+- `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `export_png`, `resize_canvas`.
+- `export_sprite_sheet`: exporta por tag ou intervalo explícito, filtra camadas e organiza frames horizontalmente, verticalmente ou em grade, respeitando direção da tag, escala, espaçamento e no-clobber.
+
+Ferramentas destrutivas exigem `confirm: true`; gravações em caminho existente exigem `overwrite: true`. Mutações com `returnPreview: true` retornam a imagem como conteúdo MCP sem repetir o base64 no bloco textual.
+
+---
+
+## Testes e integração contínua
+
+- Testes unitários, de contrato, integração e E2E executados pelo Vitest; a configuração falha se uma seleção de testes não encontrar casos.
+- O mock cobre o protocolo, recuperação incremental e as estruturas expostas pelas ferramentas.
+- `test/real/aseprite-api-smoke.lua` valida contratos críticos dentro de um processo Aseprite real.
+- O workflow de CI executa Node.js 18/20/22 e os sistemas Linux, Windows e macOS; um job separado compila a versão do Aseprite fixada no workflow e roda o smoke test real.
+- O smoke local real depende de um executável Aseprite disponível; os testes headless do Node não substituem essa validação da API Lua.
 
 ---
 

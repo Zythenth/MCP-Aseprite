@@ -63,6 +63,24 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "      Build completed successfully (dist/ generated)." -ForegroundColor Green
 
+# Verify that the packaged server artifact and Lua bridge use the same protocol.
+# dist/ is used intentionally because src/ is not part of the published npm package.
+$protocolArtifactPath = Join-Path $scriptDir "dist\bridge\protocol.js"
+$protocolSource = Get-Content -LiteralPath $protocolArtifactPath -Raw
+$luaSourcePath = Join-Path $scriptDir "lua\aseprite-bridge.lua"
+$luaBridgeSource = Get-Content -LiteralPath $luaSourcePath -Raw
+$serverProtocolMatch = [regex]::Match($protocolSource, 'BRIDGE_PROTOCOL_VERSION\s*=\s*["''](?<version>[^"'']+)["'']')
+$luaProtocolMatch = [regex]::Match($luaBridgeSource, 'BRIDGE_PROTOCOL_VERSION\s*=\s*["''](?<version>[^"'']+)["'']')
+if (-not $serverProtocolMatch.Success -or -not $luaProtocolMatch.Success) {
+    Write-Error "Could not determine the bridge protocol version from the compiled server and Lua bridge."
+    exit 1
+}
+if ($serverProtocolMatch.Groups['version'].Value -ne $luaProtocolMatch.Groups['version'].Value) {
+    Write-Error "Bridge protocol mismatch: server=$($serverProtocolMatch.Groups['version'].Value), lua=$($luaProtocolMatch.Groups['version'].Value)."
+    exit 1
+}
+Write-Host "      Bridge protocol verified: v$($serverProtocolMatch.Groups['version'].Value)." -ForegroundColor Green
+
 # 5. Run Automated Tests
 if (-not $SkipTests) {
     Write-Host "[5/5] Running automated verification test suite..." -ForegroundColor Yellow
@@ -96,8 +114,15 @@ if (Test-Path -LiteralPath $luaSource) {
         }
         $targetLua = Join-Path $asepriteScriptsDir "aseprite-bridge.lua"
         Copy-Item -Path $luaSource -Destination $targetLua -Force
-        Write-Host "✓ Copied lua/aseprite-bridge.lua directly to:" -ForegroundColor Green
+        $sourceHash = (Get-FileHash -LiteralPath $luaSource -Algorithm SHA256).Hash
+        $targetHash = (Get-FileHash -LiteralPath $targetLua -Algorithm SHA256).Hash
+        if ($sourceHash -ne $targetHash) {
+            Write-Error "Installed Lua bridge hash does not match the packaged source."
+            exit 1
+        }
+        Write-Host "[OK] Copied lua/aseprite-bridge.lua directly to:" -ForegroundColor Green
         Write-Host "  $targetLua" -ForegroundColor White
+        Write-Host "  Protocol v$($serverProtocolMatch.Groups['version'].Value), SHA-256 verified." -ForegroundColor Green
         Write-Host "  In Aseprite, open: File -> Scripts -> aseprite-bridge" -ForegroundColor Yellow
     } else {
         Write-Host "Notice: Aseprite directory not found at $appData\Aseprite." -ForegroundColor Gray

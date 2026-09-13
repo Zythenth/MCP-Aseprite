@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: Node ${{ matrix.node }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: 18
+          - os: ubuntu-latest
+            node: 20
+          - os: ubuntu-latest
+            node: 22
+          - os: windows-latest
+            node: 22
+          - os: macos-latest
+            node: 22
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  aseprite-real:
+    name: Real Aseprite / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mcp-aseprite
+      - name: Checkout pinned Aseprite source
+        shell: bash
+        run: git clone --branch v1.3.18.5 --depth 1 --recurse-submodules --shallow-submodules https://github.com/aseprite/aseprite.git aseprite-source
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y g++ clang cmake ninja-build unzip libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev xvfb
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+      - name: Build Aseprite on Linux or macOS
+        if: runner.os != 'Windows'
+        working-directory: aseprite-source
+        shell: bash
+        run: ./build.sh --auto --norun
+      - name: Build Aseprite on Windows
+        if: runner.os == 'Windows'
+        working-directory: aseprite-source
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 --auto --norun
+      - name: Run real Aseprite API smoke test on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: xvfb-run -a ./aseprite-source/build/bin/aseprite -b --script-param output="$RUNNER_TEMP/mcp-real-smoke.aseprite" --script ./mcp-aseprite/test/real/aseprite-api-smoke.lua
+      - name: Run real Aseprite API smoke test on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: ./aseprite-source/build/bin/aseprite -b --script-param output="$RUNNER_TEMP/mcp-real-smoke.aseprite" --script ./mcp-aseprite/test/real/aseprite-api-smoke.lua
+      - name: Run real Aseprite API smoke test on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& .\aseprite-source\build\bin\aseprite.exe -b --script-param "output=$env:RUNNER_TEMP\mcp-real-smoke.aseprite" --script .\mcp-aseprite\test\real\aseprite-api-smoke.lua'
