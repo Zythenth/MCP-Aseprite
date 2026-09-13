@@ -1,4 +1,4 @@
-import { getAllowedRoots } from "./security/fileAccess.js";
+import { getAllowedRoots, resolveProjectRoot } from "./security/fileAccess.js";
 import { BRIDGE_PROTOCOL_VERSION } from "./bridge/protocol.js";
 export declare const DEFAULT_PORT = 32123;
 export declare const DEFAULT_WS_PORT = 32123;
@@ -61,6 +61,7 @@ export declare const PORT: number;
 export declare const HOST: string;
 export declare const COMMAND_TIMEOUT_MS: number;
 export declare const ALLOWED_PATHS: string[];
+export declare const PROJECT_ROOT: string;
 export declare const BRIDGE_TOKEN: string | undefined;
 export declare const READ_ONLY: boolean;
 export declare const ENABLED_TOOLSETS: ("core" | "visual" | "editing" | "files" | "shapes" | "layers" | "frames" | "palette" | "cels" | "slices" | "selection" | "tiles" | "animation" | "pixel-art" | "review")[];
@@ -90,10 +91,11 @@ export declare const config: {
     readonly compactPaletteChars: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     readonly compactTransparentChar: ".";
     readonly allowedPaths: string[];
+    readonly projectRoot: string;
     readonly serverName: "aseprite-mcp";
     readonly serverVersion: "0.1.0";
     readonly protocolVersion: "2024-11-05";
-    readonly bridgeProtocolVersion: "1.0.0";
+    readonly bridgeProtocolVersion: "1.1.0";
 };
-export { getAllowedRoots };
+export { getAllowedRoots, resolveProjectRoot };
 //# sourceMappingURL=config.d.ts.map

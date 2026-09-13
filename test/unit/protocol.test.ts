@@ -17,7 +17,7 @@ describe("Protocol Unit Tests", () => {
     expect(BridgeErrorCode.DISCONNECTED).toBe("DISCONNECTED");
     expect(BridgeErrorCode.TIMEOUT).toBe("TIMEOUT");
     expect(BridgeErrorCode.NO_ACTIVE_SPRITE).toBe("NO_ACTIVE_SPRITE");
-    expect(BRIDGE_PROTOCOL_VERSION).toBe("1.0.0");
+    expect(BRIDGE_PROTOCOL_VERSION).toBe("1.1.0");
     expect(isBridgeProtocolCompatible("1.0.0")).toBe(true);
     expect(isBridgeProtocolCompatible("1.9.4")).toBe(true);
     expect(isBridgeProtocolCompatible("2.0.0")).toBe(false);

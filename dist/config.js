@@ -1,4 +1,4 @@
-import { getAllowedRoots } from "./security/fileAccess.js";
+import { getAllowedRoots, resolveProjectRoot } from "./security/fileAccess.js";
 import { BRIDGE_PROTOCOL_VERSION } from "./bridge/protocol.js";
 export const DEFAULT_PORT = 32123;
 export const DEFAULT_WS_PORT = DEFAULT_PORT;
@@ -143,6 +143,7 @@ export const PORT = parsePort(resolvePortEnv(), DEFAULT_PORT);
 export const HOST = sanitizeHost(process.env.ASEPRITE_HOST, DEFAULT_HOST);
 export const COMMAND_TIMEOUT_MS = parseCommandTimeout(process.env.ASEPRITE_COMMAND_TIMEOUT, DEFAULT_COMMAND_TIMEOUT_MS);
 export const ALLOWED_PATHS = getAllowedRoots();
+export const PROJECT_ROOT = resolveProjectRoot(process.env.ASEPRITE_PROJECT_ROOT, ALLOWED_PATHS);
 export const BRIDGE_TOKEN = parseBridgeToken(process.env.ASEPRITE_BRIDGE_TOKEN);
 export const READ_ONLY = parseBooleanEnv("ASEPRITE_READ_ONLY", process.env.ASEPRITE_READ_ONLY);
 export const ENABLED_TOOLSETS = parseToolsets(process.env.ASEPRITE_TOOLSETS);
@@ -172,10 +173,11 @@ export const config = {
     compactPaletteChars: COMPACT_PALETTE_CHARACTERS,
     compactTransparentChar: COMPACT_TRANSPARENT_CHAR,
     allowedPaths: ALLOWED_PATHS,
+    projectRoot: PROJECT_ROOT,
     serverName: SERVER_NAME,
     serverVersion: SERVER_VERSION,
     protocolVersion: MCP_PROTOCOL_VERSION,
     bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
 };
-export { getAllowedRoots };
+export { getAllowedRoots, resolveProjectRoot };
 //# sourceMappingURL=config.js.map

@@ -9,10 +9,14 @@ import {
   validateOpenPath,
   validateSaveAsPath,
   validateExportPngPath,
+  resolveProjectPath,
+  resolveProjectRoot,
   ALLOWED_OPEN_EXTENSIONS,
   ALLOWED_SAVE_EXTENSIONS,
   ALLOWED_EXPORT_EXTENSIONS,
+  ALLOWED_REFERENCE_EXTENSIONS,
 } from "../../src/security/fileAccess.js";
+
 
 describe("File Access Security Policy (fileAccess.ts)", () => {
   let createdDirs: string[] = [];
@@ -319,6 +323,60 @@ describe("File Access Security Policy (fileAccess.ts)", () => {
         /File already exists and overwrite is false/i
       );
       expect(validateExportPngPath(existingPng, true, [root])).toBe(fs.realpathSync(existingPng));
+    });
+  });
+
+  describe("resolveProjectPath and allowRelative workflows", () => {
+    it("accepts only an existing project root contained by an allowed root", () => {
+      const root = makeTempDir("mcp-proj-parent-");
+      const project = path.join(root, "project");
+      fs.mkdirSync(project);
+      const outside = makeTempDir("mcp-proj-outside-");
+
+      expect(resolveProjectRoot(project, [root])).toBe(fs.realpathSync(project));
+      expect(() => resolveProjectRoot("relative", [root])).toThrow(/not absolute/i);
+      expect(() => resolveProjectRoot(path.join(root, "missing"), [root])).toThrow(/does not exist/i);
+      expect(() => resolveProjectRoot(outside, [root])).toThrow(/outside allowed roots/i);
+    });
+
+    it("resolves relative project-root paths and ensures containment", () => {
+      const root = makeTempDir("mcp-proj-root-");
+      const relativePath = path.join("sprites", "character.png");
+      const fullPath = path.join(root, relativePath);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, "test");
+
+      const resolved = resolveProjectPath(relativePath, [root]);
+      expect(resolved).toBe(fs.realpathSync(fullPath));
+    });
+
+    it("rejects path traversal attempting to escape project root", () => {
+      const root = makeTempDir("mcp-proj-root-");
+      expect(() => resolveProjectPath("../outside.png", [root])).toThrow(/outside allowed roots/i);
+      expect(() => resolveProjectPath("sub/../../outside.png", [root])).toThrow(/outside allowed roots/i);
+    });
+
+    it("supports allowRelative in validateOpenPath", () => {
+      const root = makeTempDir("mcp-open-rel-");
+      const subFile = path.join(root, "ref.png");
+      fs.writeFileSync(subFile, "data");
+
+      const canonical = validateOpenPath("ref.png", [root], true);
+      expect(canonical).toBe(fs.realpathSync(subFile));
+    });
+
+    it("supports allowRelative in validateSaveAsPath", () => {
+      const root = makeTempDir("mcp-save-rel-");
+      const outPath = validateSaveAsPath("new_art.aseprite", false, ALLOWED_SAVE_EXTENSIONS, [root], true);
+      expect(outPath).toBe(path.join(root, "new_art.aseprite"));
+    });
+
+    it("includes standard reference image formats in ALLOWED_REFERENCE_EXTENSIONS", () => {
+      expect(ALLOWED_REFERENCE_EXTENSIONS).toContain(".png");
+      expect(ALLOWED_REFERENCE_EXTENSIONS).toContain(".jpg");
+      expect(ALLOWED_REFERENCE_EXTENSIONS).toContain(".jpeg");
+      expect(ALLOWED_REFERENCE_EXTENSIONS).toContain(".webp");
+      expect(ALLOWED_REFERENCE_EXTENSIONS).not.toContain(".aseprite");
     });
   });
 });

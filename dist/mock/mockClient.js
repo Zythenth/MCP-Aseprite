@@ -70,6 +70,7 @@ export class MockClient {
                         capabilities: {
                             mock: true,
                             changeJournal: true,
+                            referenceImageDecode: true,
                         },
                     },
                 };

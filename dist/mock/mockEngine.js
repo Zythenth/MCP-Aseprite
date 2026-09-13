@@ -1050,6 +1050,14 @@ export class MockAsepriteEngine {
                 this.layers.push(newLayer);
                 return this.finishMutation(params, { name: newLayer.name, layer: newLayer }, { x: 0, y: 0, width: this.width, height: this.height }, "layers", this.activeFrameNumber, true);
             }
+            case "load_reference_image":
+                return {
+                    success: true,
+                    width: this.width,
+                    height: this.height,
+                    colorMode: this.colorMode,
+                    pngBase64: this.exportFramePngBase64(),
+                };
             case "rename_layer": {
                 const layer = this.layers.find((l) => l.name === params.oldName);
                 if (!layer)

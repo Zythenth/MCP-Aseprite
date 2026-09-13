@@ -7,6 +7,7 @@ import { registerFileTools } from "../../src/mcp/tools/files.js";
 
 describe("File MCP Tools Security Seams (registerFileTools)", () => {
   let originalEnv: string | undefined;
+  let originalProjectRoot: string | undefined;
   let createdDirs: string[] = [];
   let registeredTools: Map<string, { schema: any; handler: (params: any) => Promise<any> }>;
   let sentCommands: Array<{ command: string; params: any; timeoutMs?: number }>;
@@ -21,6 +22,7 @@ describe("File MCP Tools Security Seams (registerFileTools)", () => {
 
   beforeEach(() => {
     originalEnv = process.env.ASEPRITE_ALLOWED_PATHS;
+    originalProjectRoot = process.env.ASEPRITE_PROJECT_ROOT;
     registeredTools = new Map();
     sentCommands = [];
     activeFilename = "untitled.aseprite";
@@ -55,6 +57,11 @@ describe("File MCP Tools Security Seams (registerFileTools)", () => {
     } else {
       process.env.ASEPRITE_ALLOWED_PATHS = originalEnv;
     }
+    if (originalProjectRoot === undefined) {
+      delete process.env.ASEPRITE_PROJECT_ROOT;
+    } else {
+      process.env.ASEPRITE_PROJECT_ROOT = originalProjectRoot;
+    }
 
     for (const dir of createdDirs) {
       try {
@@ -87,20 +94,25 @@ describe("File MCP Tools Security Seams (registerFileTools)", () => {
     expect(sentCommands.find((c) => c.command === "open_sprite")).toBeUndefined();
   });
 
-  it("save_sprite_as and export_png reject relative paths without calling dispatcher.send", async () => {
+  it("save_sprite_as and export_png resolve relative paths against the explicit project root", async () => {
     const allowedDir = makeTempDir("mcp-allowed-");
     process.env.ASEPRITE_ALLOWED_PATHS = allowedDir;
+    process.env.ASEPRITE_PROJECT_ROOT = allowedDir;
 
     const saveAsHandler = registeredTools.get("save_sprite_as")!.handler;
     const exportHandler = registeredTools.get("export_png")!.handler;
 
     const saveRes = await saveAsHandler({ filePath: "out.aseprite", overwrite: false });
-    expect(saveRes.isError).toBe(true);
-    expect(sentCommands.find((c) => c.command === "save_sprite_as")).toBeUndefined();
+    expect(saveRes.isError).toBeUndefined();
+    expect(sentCommands.find((c) => c.command === "save_sprite_as")?.params.filePath).toBe(
+      path.join(allowedDir, "out.aseprite")
+    );
 
     const expRes = await exportHandler({ outputPath: "out.png", overwrite: false });
-    expect(expRes.isError).toBe(true);
-    expect(sentCommands.find((c) => c.command === "export_png")).toBeUndefined();
+    expect(expRes.isError).toBeUndefined();
+    expect(sentCommands.find((c) => c.command === "export_png")?.params.outputPath).toBe(
+      path.join(allowedDir, "out.png")
+    );
   });
 
   it("save_sprite rejects when active sprite has no filename or filename is outside root without sending save_sprite", async () => {

@@ -5,6 +5,7 @@ param(
     [int]$Port,
     [string]$BridgeToken,
     [string[]]$AllowedPaths,
+    [string]$ProjectRoot,
     [switch]$ReadOnly,
     [string[]]$Toolsets
 )
@@ -116,6 +117,39 @@ if ($PSBoundParameters.ContainsKey('AllowedPaths')) {
         $canonicalPaths += $resolved
     }
     $env:ASEPRITE_ALLOWED_PATHS = $canonicalPaths -join [System.IO.Path]::PathSeparator
+}
+
+if ($PSBoundParameters.ContainsKey('ProjectRoot')) {
+    if ([string]::IsNullOrWhiteSpace($ProjectRoot) -or -not [System.IO.Path]::IsPathRooted($ProjectRoot)) {
+        Write-Error "ProjectRoot must be an absolute existing directory."
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $ProjectRoot -PathType Container)) {
+        Write-Error "ProjectRoot does not exist or is not a directory: '$ProjectRoot'"
+        exit 1
+    }
+    $canonicalProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
+    $effectiveAllowedPaths = if ([string]::IsNullOrWhiteSpace($env:ASEPRITE_ALLOWED_PATHS)) {
+        @((Resolve-Path -LiteralPath $scriptDir).Path)
+    } else {
+        @($env:ASEPRITE_ALLOWED_PATHS -split [regex]::Escape([System.IO.Path]::PathSeparator) | ForEach-Object {
+            (Resolve-Path -LiteralPath $_).Path
+        })
+    }
+    $projectRootAllowed = $false
+    foreach ($allowedPath in $effectiveAllowedPaths) {
+        $allowedPrefix = $allowedPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if ($canonicalProjectRoot.Equals($allowedPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $canonicalProjectRoot.StartsWith($allowedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $projectRootAllowed = $true
+            break
+        }
+    }
+    if (-not $projectRootAllowed) {
+        Write-Error "ProjectRoot must be inside one of the configured AllowedPaths."
+        exit 1
+    }
+    $env:ASEPRITE_PROJECT_ROOT = $canonicalProjectRoot
 }
 
 # Build verification before starting Node.js

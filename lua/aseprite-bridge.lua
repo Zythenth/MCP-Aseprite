@@ -5,7 +5,7 @@
 -- ==============================================================================
 
 local DEFAULT_PORT = 32123
-local BRIDGE_PROTOCOL_VERSION = "1.0.0"
+local BRIDGE_PROTOCOL_VERSION = "1.1.0"
 
 local function parseEnvPort()
   local function getTrimmed(varName)
@@ -1648,6 +1648,23 @@ handlers.create_layer = function(params)
   return finishMutation(params, { name = layer.name, parentGroup = targetGroup and targetGroup.name or JSON_NULL }, "layers", rectToTable(spr.bounds), nil, true)
 end
 
+handlers.load_reference_image = function(params)
+  if not params.filePath or type(params.filePath) ~= "string" or #params.filePath == 0 then
+    error("filePath is required.")
+  end
+  local image = Image{ fromFile = params.filePath }
+  if not image then error("Failed to load reference image: " .. tostring(params.filePath)) end
+  local pngBase64 = exportImagePngBase64(image, nil)
+  if pngBase64 == "" then error("Failed to encode reference image as PNG.") end
+  return {
+    success = true,
+    width = image.width,
+    height = image.height,
+    colorMode = getColorModeString(image.colorMode),
+    pngBase64 = pngBase64
+  }
+end
+
 handlers.rename_layer = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
@@ -3087,6 +3104,7 @@ local function initWebSocket(dlg)
               changeJournal = true,
               frameEvents = true,
               layerEvents = true,
+              referenceImageDecode = true,
               safeJson = true
             }
           }

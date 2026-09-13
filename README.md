@@ -20,7 +20,7 @@ Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 - **Inspeção visual rica**: previews em PNG com escala nearest-neighbor, réguas de coordenadas e grades customizáveis.
 - **Leitura precisa de pixels**: formatos hexadecimal (`#RRGGBBAA`), RGBA, indexado e compacto otimizado para economia de tokens.
 - **Edição em lote e Undo atômico**: operações em lote agrupadas em uma única entrada de histórico de Undo.
-- **89 ferramentas MCP tipadas**: pixels, formas, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, revisão visual e análise de pixel art.
+- **92 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, revisão visual e análise de pixel art.
 - **Estrutura nativa do Aseprite**: cels vinculados, grupos aninhados, pivôs/nine-patch, blend modes, merge/flatten e exportação avançada por tag, intervalo e camada.
 - **Ciclo visual incremental**: preview opcional após mutações, filmstrip, onion skin, comparação exata entre frames, checkpoints e histórico de alterações por revisão.
 - **Qualidade de pixel art**: lint heurístico, CIEDE2000, análise de paleta, rampas com hue shift e dithering Bayer determinístico.
@@ -130,6 +130,15 @@ Para impedir que comandos abram ou salvem arquivos fora das pastas do seu projet
 - **Proteção No-Clobber**: `save_sprite_as` e `export_png` nunca sobrescrevem arquivos existentes por padrão. Para sobrescrever intencionalmente, é necessário passar o parâmetro `overwrite: true`.
 - **Salvamento Seguro (`save_sprite`)**: a ferramenta `save_sprite` não recebe caminho do usuário nem parâmetro de rota (é invocada sem argumentos). Ela opera diretamente sobre o arquivo já associado ao sprite ativo no Aseprite (`app.sprite.filename`). A validação de integridade `expectedFilePath` é realizada internamente pelo servidor MCP consultando `aseprite_status` antes de despachar o comando ao bridge Lua, que verifica a coincidência exata do caminho antes de executar o salvamento.
 
+### 1.1. Raiz do projeto (`ASEPRITE_PROJECT_ROOT`)
+
+`ASEPRITE_PROJECT_ROOT` define a base para caminhos relativos de referências, projetos e exports. Ela deve ser um diretório absoluto existente contido em uma das raízes de `ASEPRITE_ALLOWED_PATHS`; quando omitida, usa a primeira raiz autorizada.
+
+- `references/heroi.png` é resolvido sob a raiz do projeto, nunca sob uma pasta arbitrária do computador.
+- `find_reference_images` faz busca limitada por profundidade, quantidade de resultados e total de entradas; não percorre links simbólicos.
+- `load_reference_image` aceita PNG, JPEG e WebP, valida tamanho e dimensões antes da decodificação e não altera o documento ativo.
+- `save_project` grava somente `.aseprite`, preserva exatamente um nome fornecido e mantém no-clobber por padrão.
+
 ### 2. Autenticação por Token no WebSocket (`ASEPRITE_BRIDGE_TOKEN`)
 
 Por padrão, o bridge conecta-se localmente em `127.0.0.1`. Para adicionar uma barreira extra contra acessos locais não autorizados de outros softwares rodando na máquina:
@@ -185,7 +194,8 @@ No arquivo de configuração do seu cliente MCP (por exemplo, `gemini-mcp-config
       ],
       "env": {
         "ASEPRITE_PORT": "32123",
-        "ASEPRITE_ALLOWED_PATHS": "C:/Projetos/PixelArt"
+        "ASEPRITE_ALLOWED_PATHS": "C:/Projetos/PixelArt",
+        "ASEPRITE_PROJECT_ROOT": "C:/Projetos/PixelArt"
       }
     }
   }
@@ -208,6 +218,7 @@ No arquivo de configuração do seu cliente MCP (por exemplo, `gemini-mcp-config
       "env": {
         "ASEPRITE_PORT": "32123",
         "ASEPRITE_ALLOWED_PATHS": "C:/Projetos/PixelArt;D:/Assets/Sprites",
+        "ASEPRITE_PROJECT_ROOT": "C:/Projetos/PixelArt",
         "ASEPRITE_BRIDGE_TOKEN": "SubstituaPeloSeuTokenAleatorio12345"
       }
     }
@@ -231,8 +242,8 @@ No Windows via PowerShell:
 # Execução padrão
 .\start.ps1
 
-# Especificando porta e diretórios autorizados
-.\start.ps1 -Port 32123 -AllowedPaths @("C:\Projetos\PixelArt")
+# Especificando porta, diretórios autorizados e a raiz para caminhos relativos
+.\start.ps1 -Port 32123 -AllowedPaths @("C:\Projetos\PixelArt") -ProjectRoot "C:\Projetos\PixelArt"
 
 # Execução com Mock Bridge (headless, sem Aseprite)
 .\start.ps1 -Mock
@@ -248,7 +259,7 @@ No Windows via PowerShell:
 
 ## Resumo das Ferramentas MCP
 
-O conjunto completo contém **89 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
+O conjunto completo contém **92 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
 
 ### Inspeção Visual e Leitura
 - `aseprite_status`: Estado da conexão, arquivo ativo, tamanho do canvas, camada e frame selecionados e revisão atual.
@@ -298,7 +309,9 @@ O conjunto completo contém **89 ferramentas únicas**. Para reduzir o contexto 
 
 ### Arquivos e exportação
 
-- `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `export_png`, `resize_canvas`.
+- `find_reference_images`: localiza PNG, JPEG e WebP por nome somente em diretórios autorizados, com busca recursiva limitada.
+- `load_reference_image`: retorna a imagem de referência, dimensões, formato, transparência, hash e análise de paleta sem trocar o sprite ativo.
+- `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `save_project`, `export_png`, `resize_canvas`.
 - `export_sprite_sheet`: exporta por tag ou intervalo explícito, filtra camadas e organiza frames horizontalmente, verticalmente ou em grade, respeitando direção da tag, escala, espaçamento e no-clobber.
 
 Ferramentas destrutivas exigem `confirm: true`; gravações em caminho existente exigem `overwrite: true`. Mutações com `returnPreview: true` retornam a imagem como conteúdo MCP sem repetir o base64 no bloco textual.
@@ -326,6 +339,7 @@ Ferramentas destrutivas exigem `confirm: true`; gravações em caminho existente
 ### Erro de acesso negado em operações de arquivo
 - Se receber `Access denied: path is outside allowed roots`, adicione o diretório do arquivo à variável `ASEPRITE_ALLOWED_PATHS`.
 - Certifique-se de que os caminhos em `ASEPRITE_ALLOWED_PATHS` sejam absolutos e usem `;` como separador no Windows.
+- Para usar caminhos relativos, defina `ASEPRITE_PROJECT_ROOT` dentro de uma das raízes autorizadas.
 
 ### Arquivo já existe e não é salvo
 - Por padrão, o servidor adota a política no-clobber. Ao salvar em um arquivo existente via `save_sprite_as` ou exportar via `export_png`, inclua `"overwrite": true` nos argumentos da ferramenta.

@@ -39,6 +39,7 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     expect(startContent).toContain("ASEPRITE_PORT");
     expect(startContent).toContain("BridgeToken");
     expect(startContent).toContain("AllowedPaths");
+    expect(startContent).toContain("ProjectRoot");
 
     const examplePath = path.resolve(rootDir, "examples/gemini-mcp-config.json");
     const exampleRaw = fs.readFileSync(examplePath, "utf-8");
@@ -46,11 +47,13 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     expect(exampleRaw).not.toContain("ASEPRITE_MCP_PORT");
     expect(exampleRaw).toContain("ASEPRITE_PORT");
     expect(exampleRaw).toContain("ASEPRITE_ALLOWED_PATHS");
+    expect(exampleRaw).toContain("ASEPRITE_PROJECT_ROOT");
 
     // Must be valid JSON
     const parsed = JSON.parse(exampleRaw);
     expect(parsed.mcpServers?.aseprite?.env?.ASEPRITE_PORT).toBe("32123");
     expect(parsed.mcpServers?.aseprite?.env?.ASEPRITE_ALLOWED_PATHS).toBeDefined();
+    expect(parsed.mcpServers?.aseprite?.env?.ASEPRITE_PROJECT_ROOT).toBeDefined();
   });
 
   it("README.md documents security policies, tokens, non-official nature, and forbids editing PORT in Lua", () => {
@@ -58,6 +61,7 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     const readmeContent = fs.readFileSync(readmePath, "utf-8");
 
     expect(readmeContent).toContain("ASEPRITE_ALLOWED_PATHS");
+    expect(readmeContent).toContain("ASEPRITE_PROJECT_ROOT");
     expect(readmeContent).toContain("ASEPRITE_BRIDGE_TOKEN");
     expect(readmeContent).toContain("overwrite");
     expect(readmeContent).toMatch(/não oficial|Não Oficial/i);
@@ -75,6 +79,7 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     expect(startContent).toContain("$PSBoundParameters.ContainsKey('Port')");
     expect(startContent).toContain("$PSBoundParameters.ContainsKey('BridgeToken')");
     expect(startContent).toContain("$PSBoundParameters.ContainsKey('AllowedPaths')");
+    expect(startContent).toContain("$PSBoundParameters.ContainsKey('ProjectRoot')");
 
     // Port preservation and fallback logic
     expect(startContent).toContain("$env:ASEPRITE_PORT");
@@ -143,10 +148,13 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
 
   it("README documents the complete configurable surface and in-memory review-state limitation", () => {
     const readmeContent = fs.readFileSync(path.resolve(rootDir, "README.md"), "utf-8");
-    expect(readmeContent).toContain("89 ferramentas");
+    expect(readmeContent).toContain("92 ferramentas");
     expect(readmeContent).toContain("ASEPRITE_READ_ONLY");
     expect(readmeContent).toContain("ASEPRITE_TOOLSETS");
     expect(readmeContent).toContain("export_sprite_sheet");
+    expect(readmeContent).toContain("load_reference_image");
+    expect(readmeContent).toContain("find_reference_images");
+    expect(readmeContent).toContain("save_project");
     expect(readmeContent).toContain("get_onion_skin");
     expect(readmeContent).toContain("lint_pixel_art");
     expect(readmeContent).toMatch(/mantidos apenas em memória/i);

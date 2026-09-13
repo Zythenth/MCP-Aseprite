@@ -5,6 +5,8 @@ import path from "node:path";
 export const ALLOWED_OPEN_EXTENSIONS = [".ase", ".aseprite", ".png"] as const;
 export const ALLOWED_SAVE_EXTENSIONS = [".ase", ".aseprite", ".png"] as const;
 export const ALLOWED_EXPORT_EXTENSIONS = [".png"] as const;
+export const ALLOWED_PROJECT_EXTENSIONS = [".aseprite"] as const;
+export const ALLOWED_REFERENCE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"] as const;
 
 /**
  * Resolves and canonicalizes configured allowed root directories.
@@ -99,6 +101,124 @@ export function isPathWithinRoots(targetPath: string, roots: string[] = getAllow
 }
 
 /**
+ * Resolves a project path that may be relative or absolute.
+ * If relative, resolves against the configured project root.
+ * Verifies that the resolved path does not traverse outside the authorized roots.
+ */
+export function resolveProjectRoot(
+  rawEnv: string | undefined = process.env.ASEPRITE_PROJECT_ROOT,
+  roots: string[] = getAllowedRoots()
+): string {
+  if (roots.length === 0) throw new Error("No allowed roots configured.");
+  const configured = rawEnv?.trim();
+  const candidate = configured && configured.length > 0 ? configured : roots[0];
+  if (!path.isAbsolute(candidate)) {
+    throw new Error(`Configured project root is not absolute: '${candidate}'`);
+  }
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync(candidate);
+  } catch (error: any) {
+    throw new Error(`Configured project root does not exist: '${candidate}' (${error.message})`);
+  }
+  if (!fs.statSync(canonical).isDirectory()) {
+    throw new Error(`Configured project root is not a directory: '${candidate}'`);
+  }
+  if (!isPathWithinRoots(canonical, roots)) {
+    throw new Error("Configured project root is outside allowed roots.");
+  }
+  return canonical;
+}
+
+function canonicalizeCandidate(candidate: string, roots: string[]): string {
+  try {
+    const canonical = fs.realpathSync(candidate);
+    if (!isPathWithinRoots(canonical, roots)) {
+      throw new Error("Access denied: path resolves outside allowed roots.");
+    }
+    return canonical;
+  } catch (error: any) {
+    if (error instanceof Error && error.message === "Access denied: path resolves outside allowed roots.") {
+      throw error;
+    }
+    if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") {
+      throw new Error(`Failed to resolve path '${candidate}': ${error?.message ?? String(error)}`);
+    }
+  }
+
+  let ancestor = candidate;
+  const missingParts: string[] = [];
+  while (!fs.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) throw new Error(`Unable to resolve an existing ancestor for '${candidate}'.`);
+    missingParts.unshift(path.basename(ancestor));
+    ancestor = parent;
+  }
+
+  let canonicalAncestor: string;
+  try {
+    canonicalAncestor = fs.realpathSync(ancestor);
+  } catch (error: any) {
+    throw new Error(`Failed to canonicalize ancestor '${ancestor}': ${error.message}`);
+  }
+  if (!isPathWithinRoots(canonicalAncestor, roots)) {
+    throw new Error("Access denied: path resolves outside allowed roots.");
+  }
+  const canonicalCandidate = path.join(canonicalAncestor, ...missingParts);
+  if (!isPathWithinRoots(canonicalCandidate, roots)) {
+    throw new Error("Access denied: path resolves outside allowed roots.");
+  }
+  return canonicalCandidate;
+}
+
+export function resolveProjectPath(
+  filePath: string,
+  roots: string[] = getAllowedRoots(),
+  projectRoot: string = resolveProjectRoot(undefined, roots)
+): string {
+  if (!filePath || typeof filePath !== "string" || filePath.trim() === "") {
+    throw new Error("File path is required.");
+  }
+  if (roots.length === 0) {
+    throw new Error("No allowed roots configured.");
+  }
+
+  const canonicalProjectRoot = resolveProjectRoot(projectRoot, roots);
+  const absoluteCandidate = path.isAbsolute(filePath)
+    ? path.normalize(path.resolve(filePath))
+    : path.normalize(path.resolve(canonicalProjectRoot, filePath));
+  try {
+    return canonicalizeCandidate(absoluteCandidate, roots);
+  } catch (error: any) {
+    if (String(error?.message).startsWith("Access denied:")) {
+      throw new Error(`Access denied: path '${filePath}' resolves outside allowed roots.`);
+    }
+    throw error;
+  }
+}
+
+export function validateDirectoryPath(
+  directoryPath: string,
+  roots: string[] = getAllowedRoots(),
+  allowRelative = true,
+  projectRoot?: string
+): string {
+  const effectivePath = allowRelative
+    ? resolveProjectPath(directoryPath, roots, projectRoot ?? resolveProjectRoot(undefined, roots))
+    : directoryPath;
+  if (!path.isAbsolute(effectivePath)) throw new Error(`Directory path must be absolute: '${directoryPath}'`);
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync(effectivePath);
+  } catch {
+    throw new Error(`Directory does not exist: '${directoryPath}'`);
+  }
+  if (!fs.statSync(canonical).isDirectory()) throw new Error(`Path is not a directory: '${directoryPath}'`);
+  if (!isPathWithinRoots(canonical, roots)) throw new Error("Access denied: directory is outside allowed roots.");
+  return canonical;
+}
+
+/**
  * Validates a file path for opening/reading.
  * Requires an absolute path, allowlisted extension, existing regular file,
  * canonicalizes via realpath (internal symlinks within roots are resolved; escapes outside roots rejected),
@@ -106,26 +226,34 @@ export function isPathWithinRoots(targetPath: string, roots: string[] = getAllow
  */
 export function validateOpenPath(
   filePath: string,
-  roots: string[] = getAllowedRoots()
+  roots: string[] = getAllowedRoots(),
+  allowRelative: boolean = false,
+  projectRoot?: string,
+  allowedExtensions: readonly string[] = ALLOWED_OPEN_EXTENSIONS
 ): string {
   if (!filePath || typeof filePath !== "string") {
     throw new Error("File path is required.");
   }
 
-  if (!path.isAbsolute(filePath)) {
+  const effectivePath = allowRelative
+    ? resolveProjectPath(filePath, roots, projectRoot ?? resolveProjectRoot(undefined, roots))
+    : filePath;
+
+  if (!path.isAbsolute(effectivePath)) {
     throw new Error(`File path must be an absolute path: '${filePath}'`);
   }
 
-  const ext = path.extname(filePath).toLowerCase();
-  if (!ALLOWED_OPEN_EXTENSIONS.includes(ext as any)) {
+
+  const ext = path.extname(effectivePath).toLowerCase();
+  if (!allowedExtensions.includes(ext)) {
     throw new Error(
-      `Invalid file extension '${ext}'. Allowed extensions for opening: ${ALLOWED_OPEN_EXTENSIONS.join(", ")}`
+      `Invalid file extension '${ext}'. Allowed extensions for opening: ${allowedExtensions.join(", ")}`
     );
   }
 
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(filePath);
+    stat = fs.statSync(effectivePath);
   } catch {
     throw new Error(`File does not exist: '${filePath}'`);
   }
@@ -136,10 +264,11 @@ export function validateOpenPath(
 
   let canonicalPath: string;
   try {
-    canonicalPath = fs.realpathSync(filePath);
+    canonicalPath = fs.realpathSync(effectivePath);
   } catch (err: any) {
     throw new Error(`Failed to resolve canonical path for '${filePath}': ${err.message}`);
   }
+
 
   const canonicalStat = fs.statSync(canonicalPath);
   if (!canonicalStat.isFile()) {
@@ -163,24 +292,31 @@ export function validateSaveAsPath(
   filePath: string,
   overwrite: boolean = false,
   allowedExtensions: readonly string[] = ALLOWED_SAVE_EXTENSIONS,
-  roots: string[] = getAllowedRoots()
+  roots: string[] = getAllowedRoots(),
+  allowRelative: boolean = false,
+  projectRoot?: string
 ): string {
   if (!filePath || typeof filePath !== "string") {
     throw new Error("Target file path is required.");
   }
 
-  if (!path.isAbsolute(filePath)) {
+  const effectivePath = allowRelative
+    ? resolveProjectPath(filePath, roots, projectRoot ?? resolveProjectRoot(undefined, roots))
+    : filePath;
+
+  if (!path.isAbsolute(effectivePath)) {
     throw new Error(`Target file path must be an absolute path: '${filePath}'`);
   }
 
-  const ext = path.extname(filePath).toLowerCase();
+  const ext = path.extname(effectivePath).toLowerCase();
   if (!allowedExtensions.includes(ext)) {
     throw new Error(
       `Invalid file extension '${ext}'. Allowed extensions: ${allowedExtensions.join(", ")}`
     );
   }
 
-  const parentDir = path.dirname(filePath);
+  const parentDir = path.dirname(effectivePath);
+
   let parentStat: fs.Stats;
   try {
     parentStat = fs.statSync(parentDir);
@@ -203,7 +339,7 @@ export function validateSaveAsPath(
     throw new Error("Access denied: parent directory is outside allowed roots.");
   }
 
-  const fileName = path.basename(filePath);
+  const fileName = path.basename(effectivePath);
   const targetCandidate = path.join(canonicalParent, fileName);
 
   let destLstat: fs.Stats | null = null;
@@ -255,7 +391,24 @@ export function validateSaveAsPath(
 export function validateExportPngPath(
   outputPath: string,
   overwrite: boolean = false,
-  roots: string[] = getAllowedRoots()
+  roots: string[] = getAllowedRoots(),
+  allowRelative: boolean = false,
+  projectRoot?: string
 ): string {
-  return validateSaveAsPath(outputPath, overwrite, ALLOWED_EXPORT_EXTENSIONS, roots);
+  return validateSaveAsPath(outputPath, overwrite, ALLOWED_EXPORT_EXTENSIONS, roots, allowRelative, projectRoot);
+}
+
+export function validateReferencePath(
+  filePath: string,
+  roots: string[] = getAllowedRoots(),
+  allowRelative = true,
+  projectRoot?: string
+): string {
+  return validateOpenPath(
+    filePath,
+    roots,
+    allowRelative,
+    projectRoot,
+    ALLOWED_REFERENCE_EXTENSIONS
+  );
 }

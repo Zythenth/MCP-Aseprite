@@ -44,7 +44,7 @@ describe("Config Constants & Sanitization Tests", () => {
   });
 
   it("should define valid bridge protocol version", () => {
-    expect(BRIDGE_PROTOCOL_VERSION).toBe("1.0.0");
+    expect(BRIDGE_PROTOCOL_VERSION).toBe("1.1.0");
     expect(config.bridgeProtocolVersion).toBe(BRIDGE_PROTOCOL_VERSION);
     expect(config.bridgeProtocolVersion).not.toBe(config.protocolVersion);
   });

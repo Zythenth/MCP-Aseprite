@@ -1,6 +1,8 @@
 export declare const ALLOWED_OPEN_EXTENSIONS: readonly [".ase", ".aseprite", ".png"];
 export declare const ALLOWED_SAVE_EXTENSIONS: readonly [".ase", ".aseprite", ".png"];
 export declare const ALLOWED_EXPORT_EXTENSIONS: readonly [".png"];
+export declare const ALLOWED_PROJECT_EXTENSIONS: readonly [".aseprite"];
+export declare const ALLOWED_REFERENCE_EXTENSIONS: readonly [".png", ".jpg", ".jpeg", ".webp"];
 /**
  * Resolves and canonicalizes configured allowed root directories.
  * Parses paths separated by path.delimiter (; on Windows, : on POSIX).
@@ -19,21 +21,30 @@ export declare function getAllowedRoots(customEnv?: string): string[];
  */
 export declare function isPathWithinRoots(targetPath: string, roots?: string[]): boolean;
 /**
+ * Resolves a project path that may be relative or absolute.
+ * If relative, resolves against the configured project root.
+ * Verifies that the resolved path does not traverse outside the authorized roots.
+ */
+export declare function resolveProjectRoot(rawEnv?: string | undefined, roots?: string[]): string;
+export declare function resolveProjectPath(filePath: string, roots?: string[], projectRoot?: string): string;
+export declare function validateDirectoryPath(directoryPath: string, roots?: string[], allowRelative?: boolean, projectRoot?: string): string;
+/**
  * Validates a file path for opening/reading.
  * Requires an absolute path, allowlisted extension, existing regular file,
  * canonicalizes via realpath (internal symlinks within roots are resolved; escapes outside roots rejected),
  * and ensures the canonical path is within allowed roots.
  */
-export declare function validateOpenPath(filePath: string, roots?: string[]): string;
+export declare function validateOpenPath(filePath: string, roots?: string[], allowRelative?: boolean, projectRoot?: string, allowedExtensions?: readonly string[]): string;
 /**
  * Validates a file path for saving/writing.
  * Requires absolute path, valid extension, existing directory for parent,
  * checks no-clobber when overwrite is false, rejects symlinks and directory targets,
  * and canonicalizes destination within allowed roots.
  */
-export declare function validateSaveAsPath(filePath: string, overwrite?: boolean, allowedExtensions?: readonly string[], roots?: string[]): string;
+export declare function validateSaveAsPath(filePath: string, overwrite?: boolean, allowedExtensions?: readonly string[], roots?: string[], allowRelative?: boolean, projectRoot?: string): string;
 /**
  * Validates an output path for PNG export.
  */
-export declare function validateExportPngPath(outputPath: string, overwrite?: boolean, roots?: string[]): string;
+export declare function validateExportPngPath(outputPath: string, overwrite?: boolean, roots?: string[], allowRelative?: boolean, projectRoot?: string): string;
+export declare function validateReferencePath(filePath: string, roots?: string[], allowRelative?: boolean, projectRoot?: string): string;
 //# sourceMappingURL=fileAccess.d.ts.map
