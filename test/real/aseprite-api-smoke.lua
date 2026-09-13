@@ -17,9 +17,17 @@ image:clear(app.pixelColor.rgba(0, 0, 0, 0))
 image:putPixel(1, 1, app.pixelColor.rgba(255, 0, 0, 255))
 local cel1 = sprite:newCel(base, 1, image, Point(2, 1))
 local cel2 = sprite:newCel(base, frame2, cel1.image, Point(3, 2))
+app.layer = base
+app.frame = sprite.frames[1]
+app.range:clear()
+app.range.layers = { base }
+app.range.frames = { 1, 2 }
+check(app.command.LinkCels() ~= false, "LinkCels command was rejected")
+app.range:clear()
+cel2 = base:cel(frame2)
 cel2.opacity = 192
 check(cel1.image.id == cel2.image.id, "linked cels did not share an image id")
-check(cel2.position.x == 3 and cel2.opacity == 192, "cel position/opacity contract failed")
+check(cel2.position.x == cel1.position.x and cel2.opacity == 192, "linked cel position/opacity contract failed")
 
 local group = sprite:newGroup()
 group.name = "Characters"

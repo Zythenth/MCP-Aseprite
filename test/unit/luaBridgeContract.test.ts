@@ -83,11 +83,13 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(setTiles).toMatch(/app\.transaction\(["']MCP set tiles["'][\s\S]*?spr:newCel/);
     });
 
-    it("tracks linked cels across all layers and rejects self-links", () => {
+    it("tracks linked cels and uses Aseprite's native same-layer link command", () => {
       const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
       expect(luaContent).toMatch(/local\s+function\s+linkedCelsForCel\s*\(spr,\s*cel\)/);
       expect(luaContent).toMatch(/ipairs\(spr\.cels\s+or\s+\{\}\)/);
       expect(luaContent).toMatch(/Source and target cel must be different/);
+      expect(luaContent).toMatch(/Linked cels must belong to the same image layer/);
+      expect(luaContent).toMatch(/app\.command\.LinkCels\s*\(\s*\)/);
     });
 
     it("validates complete absence of revisionSnapshots in TestHarness", () => {

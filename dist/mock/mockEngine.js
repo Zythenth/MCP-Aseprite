@@ -1238,6 +1238,9 @@ export class MockAsepriteEngine {
                 if (sourceLayer.index === targetLayer.index && sourceFrame.frameNumber === targetFrame.frameNumber) {
                     throw new Error("Source and target cel must be different.");
                 }
+                if (sourceLayer.index !== targetLayer.index) {
+                    throw new Error("Linked cels must belong to the same image layer.");
+                }
                 const source = this.cels.get(`${sourceLayer.index}:${sourceFrame.frameNumber}`);
                 if (!source)
                     throw new Error("Source cel not found.");

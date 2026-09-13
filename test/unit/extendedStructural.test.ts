@@ -29,7 +29,7 @@ describe("Extended structural sprite tools", () => {
     expect(engine.executeCommand("get_cel", { frameNumber: 2 }).hasCel).toBe(false);
   });
 
-  it("links cels across layers and rejects linking a cel to itself", () => {
+  it("rejects self-links and cross-layer links unsupported by Aseprite", () => {
     engine.executeCommand("create_frame", { duration: 100 });
     engine.executeCommand("create_cel", { layerName: "Layer 1", frameNumber: 2, color: "#00FF00FF" });
     expect(() => engine.executeCommand("link_cel", {
@@ -39,14 +39,10 @@ describe("Extended structural sprite tools", () => {
     })).toThrow(/must be different/);
 
     engine.executeCommand("create_layer", { name: "Other" });
-    engine.executeCommand("link_cel", {
+    expect(() => engine.executeCommand("link_cel", {
       sourceLayerName: "Layer 1", sourceFrame: 2,
       targetLayerName: "Other", targetFrame: 1,
-    });
-    const source = engine.executeCommand("get_cel", { layerName: "Layer 1", frameNumber: 2 });
-    expect(source.cel.linkedCels).toContainEqual({ layer: "Other", frameNumber: 1 });
-    expect(source.cel.linkedFrames).toEqual([]);
-    expect(engine.executeCommand("unlink_cel", { layerName: "Other", frameNumber: 1 }).linked).toBe(false);
+    })).toThrow(/same image layer/);
   });
 
   it("maintains recursive groups and prevents hierarchy cycles", () => {

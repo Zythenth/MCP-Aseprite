@@ -70,7 +70,7 @@ export function registerCelTools(server: McpServer, dispatcher: CommandDispatche
     catch (error) { return bridgeToolError(error); }
   });
 
-  server.tool("link_cel", "Creates a target cel that shares image data with a source cel.", {
+  server.tool("link_cel", "Creates a target cel in the same image layer that shares image data with a source cel.", {
     sourceLayerName: z.string().min(1).max(128).optional(),
     sourceLayerIndex: z.number().int().min(0).optional(),
     sourceFrame: z.number().int().positive(),

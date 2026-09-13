@@ -1934,6 +1934,9 @@ handlers.link_cel = function(params)
   if sourceLayer == targetLayer and sourceFrame == targetFrame then
     error("Source and target cel must be different.")
   end
+  if sourceLayer ~= targetLayer then
+    error("Linked cels must belong to the same image layer.")
+  end
   local sourceCel = sourceLayer:cel(sourceFrame)
   if not sourceCel then error("Source cel not found.") end
   local existing = targetLayer:cel(targetFrame)
@@ -1943,6 +1946,18 @@ handlers.link_cel = function(params)
     app.transaction("MCP link cel", function()
       if existing then spr:deleteCel(existing) end
       created = spr:newCel(targetLayer, targetFrame, sourceCel.image, sourceCel.position)
+      app.layer = sourceLayer
+      app.frame = sourceFrame
+      app.range:clear()
+      app.range.layers = { sourceLayer }
+      app.range.frames = { sourceFrame.frameNumber, targetFrame.frameNumber }
+      local commandResult = app.command.LinkCels()
+      app.range:clear()
+      if commandResult == false then error("Aseprite refused to link the selected cels.") end
+      created = targetLayer:cel(targetFrame)
+      if not created or created.image.id ~= sourceCel.image.id then
+        error("Aseprite did not create a linked cel.")
+      end
       created.opacity = sourceCel.opacity
     end)
     app.refresh()
