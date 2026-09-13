@@ -125,6 +125,7 @@ export declare class MockAsepriteEngine {
         to: number;
         color?: string;
         direction: "forward" | "reverse" | "pingpong" | "pingpong_reverse";
+        repeats: number;
     }>;
     slices: MockSlice[];
     selectionPixels: Set<number>;

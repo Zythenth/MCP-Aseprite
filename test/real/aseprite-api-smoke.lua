@@ -50,7 +50,9 @@ check(not sprite.selection.isEmpty and not sprite.selection:contains(2, 2), "sel
 local tag = sprite:newTag(1, 2)
 tag.name = "bounce"
 tag.aniDir = AniDir.PING_PONG_REVERSE
+tag.repeats = 0
 check(tag.aniDir == AniDir.PING_PONG_REVERSE, "tag direction failed")
+check(tag.repeats == 0, "tag repeats failed")
 
 base.blendMode = BlendMode.MULTIPLY
 check(base.blendMode == BlendMode.MULTIPLY, "editable blend mode failed")
@@ -94,5 +96,26 @@ local loadedReference = Image{ fromFile = referenceOutput }
 check(loadedReference and loadedReference.width == sprite.width and loadedReference.height == sprite.height,
   "Image{ fromFile=... } reference loading contract failed")
 os.remove(referenceOutput)
+
+local gifOutput = output .. ".gif"
+local preview = Sprite(sprite.width, sprite.height, ColorMode.RGB)
+local previewLayer = preview.layers[1]
+for sequenceIndex, sourceFrameNumber in ipairs({ 1, 2, 1 }) do
+  local targetFrame = sequenceIndex == 1 and preview.frames[1] or preview:newEmptyFrame(sequenceIndex)
+  local flattened = Image(ImageSpec{ width = sprite.width, height = sprite.height, colorMode = ColorMode.RGB, transparentColor = 0 })
+  flattened:clear(app.pixelColor.rgba(0, 0, 0, 0))
+  flattened:drawSprite(sprite, sourceFrameNumber, Point(0, 0))
+  local existingCel = previewLayer:cel(targetFrame)
+  if existingCel then existingCel.image = flattened
+  else preview:newCel(previewLayer, targetFrame, flattened, Point(0, 0)) end
+  targetFrame.duration = sprite.frames[sourceFrameNumber].duration
+end
+local previewTag = preview:newTag(1, #preview.frames)
+previewTag.repeats = 0
+preview:saveAs(gifOutput)
+check(app.fs.isFile(gifOutput), "real Aseprite did not write the animation GIF")
+preview:close()
+app.sprite = sprite
+os.remove(gifOutput)
 print("ASEPRITE_REAL_SMOKE_OK " .. tostring(app.version) .. " api=" .. tostring(app.apiVersion))
 sprite:close()

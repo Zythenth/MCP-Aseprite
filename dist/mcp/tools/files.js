@@ -6,11 +6,13 @@ import { z } from "zod";
 import { validateOpenPath, validateSaveAsPath, validateExportPngPath, getAllowedRoots, resolveProjectRoot, validateDirectoryPath, validateReferencePath, isPathWithinRoots, ALLOWED_SAVE_EXTENSIONS, ALLOWED_PROJECT_EXTENSIONS, ALLOWED_REFERENCE_EXTENSIONS, } from "../../security/fileAccess.js";
 import { decodePngBase64Sync, decodePngBufferSync } from "../../image/png.js";
 import { analyzeImagePalette } from "../../image/pixelArt.js";
+import { resolveAnimationPlayback, } from "../animationSelection.js";
 import { bridgeToolResult } from "./common.js";
 const MAX_REFERENCE_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_REFERENCE_DIMENSION = 4096;
 const MAX_REFERENCE_PIXELS = 16_777_216;
 const MAX_REFERENCE_SCAN_ENTRIES = 10_000;
+const MAX_ANIMATION_EXPORT_FRAMES = 256;
 function validateReferenceDimensions(width, height) {
     if (width < 1 || height < 1
         || width > MAX_REFERENCE_DIMENSION || height > MAX_REFERENCE_DIMENSION
@@ -113,8 +115,11 @@ function validateReferenceHeader(buffer, extension) {
 }
 function requireBaseName(fileName) {
     const trimmed = fileName.trim();
-    if (!trimmed || path.basename(trimmed) !== trimmed || trimmed === "." || trimmed === "..") {
+    if (!trimmed || /[\\/]/.test(trimmed) || path.basename(trimmed) !== trimmed || trimmed === "." || trimmed === "..") {
         throw new Error("fileName must be a plain file name without directory components.");
+    }
+    if (/[<>:"|?*\u0000-\u001F]/.test(trimmed) || /[. ]$/.test(trimmed)) {
+        throw new Error("fileName contains characters that are unsafe or invalid on supported platforms.");
     }
     return trimmed;
 }
@@ -150,6 +155,12 @@ function alphaSummary(image) {
 function slug(value) {
     const normalized = value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
     return normalized.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
+}
+function requireFileStem(value) {
+    const stem = requireBaseName(value);
+    if (path.extname(stem) !== "")
+        throw new Error("baseName must not include a file extension.");
+    return stem;
 }
 export function registerFileTools(server, dispatcher, stateTracker) {
     // 1. new_sprite
@@ -539,6 +550,136 @@ export function registerFileTools(server, dispatcher, stateTracker) {
                             palette,
                         }, null, 2) },
                 ] };
+        }
+        catch (error) {
+            return { content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };
+        }
+    });
+    server.tool("export_animation", "Exports a selected animation as a GIF, sprite sheet, PNG sequence, or single PNG. APNG is reported as unsupported unless a future bridge implements it.", {
+        format: z.enum(["gif", "sprite_sheet", "png_sequence", "png", "apng"]),
+        outputPath: z.string().optional().describe("Target file for GIF, sprite_sheet, PNG, or APNG; relative to project root or absolute"),
+        outputDirectory: z.string().optional().describe("Existing target directory for png_sequence"),
+        baseName: z.string().min(1).max(120).optional().describe("PNG-sequence file stem without extension"),
+        tagName: z.string().min(1).max(128).optional(),
+        fromFrame: z.number().int().positive().optional(),
+        toFrame: z.number().int().positive().optional(),
+        direction: z.enum(["forward", "reverse", "pingpong", "pingpong_reverse"]).optional(),
+        scale: z.number().int().min(1).max(8).optional().default(1),
+        loop: z.boolean().optional().describe("GIF loop override; defaults to the selected tag repeat setting"),
+        layout: z.enum(["horizontal", "vertical", "grid"]).optional().default("horizontal"),
+        columns: z.number().int().min(1).max(64).optional(),
+        spacing: z.number().int().min(0).max(64).optional().default(0),
+        overwrite: z.boolean().optional().default(false),
+    }, async (params) => {
+        try {
+            if (params.format === "apng") {
+                throw new Error("APNG export is not supported by the current Aseprite bridge. Use GIF or PNG sequence.");
+            }
+            const capabilities = stateTracker.getCapabilities();
+            if (!capabilities.animationInspection) {
+                throw new Error("The connected Aseprite bridge cannot inspect animations. Reinstall the bundled Lua bridge.");
+            }
+            const inspection = await dispatcher.send("inspect_animation", {}, 10_000);
+            if (typeof inspection.revision === "number")
+                stateTracker.setRevision(inspection.revision);
+            const playback = resolveAnimationPlayback(inspection, params);
+            if (playback.frameNumbers.length > MAX_ANIMATION_EXPORT_FRAMES) {
+                throw new Error(`Animation export is limited to ${MAX_ANIMATION_EXPORT_FRAMES} playback frames.`);
+            }
+            const roots = getAllowedRoots();
+            const projectRoot = resolveProjectRoot(undefined, roots);
+            const overwrite = params.overwrite ?? false;
+            const scale = params.scale ?? 1;
+            if (params.format === "png_sequence") {
+                if (params.outputPath)
+                    throw new Error("png_sequence uses outputDirectory/baseName, not outputPath.");
+                const outputDirectory = validateDirectoryPath(params.outputDirectory ?? projectRoot, roots, true, projectRoot);
+                const baseName = params.baseName
+                    ? requireFileStem(params.baseName)
+                    : slug(playback.tagName ?? "animation") || "animation";
+                const digits = Math.max(4, String(playback.frameNumbers.length).length);
+                const targets = playback.frameNumbers.map((sourceFrame, index) => {
+                    const fileName = `${baseName}_${String(index + 1).padStart(digits, "0")}.png`;
+                    const outputPath = validateExportPngPath(path.join(outputDirectory, fileName), overwrite, roots);
+                    return { sequenceIndex: index + 1, sourceFrame, fileName, outputPath };
+                });
+                const completed = [];
+                try {
+                    for (const target of targets) {
+                        await dispatcher.send("export_png", {
+                            outputPath: target.outputPath,
+                            frameNumber: target.sourceFrame,
+                            scale,
+                            overwrite,
+                        }, 15_000);
+                        completed.push(target);
+                    }
+                }
+                catch (error) {
+                    if (!overwrite) {
+                        await Promise.all(completed.map(async (target) => {
+                            try {
+                                await fs.promises.unlink(target.outputPath);
+                            }
+                            catch { /* best-effort rollback */ }
+                        }));
+                    }
+                    throw error;
+                }
+                return { content: [{ type: "text", text: JSON.stringify({
+                                success: true,
+                                format: params.format,
+                                outputDirectory,
+                                baseName,
+                                files: targets,
+                                playback,
+                                scale,
+                                overwrite,
+                            }, null, 2) }] };
+            }
+            if (params.outputDirectory || params.baseName) {
+                throw new Error(`${params.format} uses outputPath, not outputDirectory/baseName.`);
+            }
+            if (!params.outputPath)
+                throw new Error(`outputPath is required for ${params.format}.`);
+            if (params.format === "gif") {
+                if (!capabilities.animationGif) {
+                    throw new Error("The connected Aseprite bridge cannot export GIF animations. Reinstall the bundled Lua bridge.");
+                }
+                if (playback.frameNumbers.length > 64)
+                    throw new Error("GIF export is limited to 64 playback frames.");
+                const outputPath = validateSaveAsPath(params.outputPath, overwrite, [".gif"], roots, true, projectRoot);
+                const result = await dispatcher.send("render_animation_gif", {
+                    outputPath,
+                    overwrite,
+                    frameNumbers: playback.frameNumbers,
+                    tagName: playback.tagName ?? undefined,
+                    scale,
+                    loop: params.loop ?? playback.loopsContinuously,
+                }, 60_000);
+                return { content: [{ type: "text", text: JSON.stringify({ ...result, format: params.format, playback }, null, 2) }] };
+            }
+            const outputPath = validateExportPngPath(params.outputPath, overwrite, roots, true, projectRoot);
+            if (params.format === "png") {
+                const sourceFrame = playback.frameNumbers[0];
+                const result = await dispatcher.send("export_png", {
+                    outputPath,
+                    frameNumber: sourceFrame,
+                    scale,
+                    overwrite,
+                }, 15_000);
+                return { content: [{ type: "text", text: JSON.stringify({ ...result, format: params.format, playback, sourceFrame }, null, 2) }] };
+            }
+            const result = await dispatcher.send("export_sprite_sheet", {
+                outputPath,
+                frameNumbers: playback.frameNumbers,
+                layout: params.layout ?? "horizontal",
+                columns: params.columns,
+                spacing: params.spacing ?? 0,
+                scale,
+                overwrite,
+            }, 30_000);
+            return { content: [{ type: "text", text: JSON.stringify({ ...result, format: params.format, playback }, null, 2) }] };
         }
         catch (error) {
             return { content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };

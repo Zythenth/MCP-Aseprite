@@ -27,14 +27,18 @@ describe("MCP tool exposure policy", () => {
   });
 
   it("removes Aseprite mutations in read-only mode but preserves inspection", async () => {
-    const names = await listNames({ readOnly: true, toolsets: ["core", "visual", "editing", "layers", "files", "pixel-art"] });
+    const names = await listNames({ readOnly: true, toolsets: ["core", "visual", "editing", "layers", "files", "animation", "pixel-art"] });
     expect(names).toContain("get_canvas");
     expect(names).toContain("list_layers");
     expect(names).toContain("lint_pixel_art");
     expect(names).toContain("open_sprite");
+    expect(names).toContain("load_reference_image");
+    expect(names).toContain("inspect_animation");
+    expect(names).toContain("render_animation_preview");
     expect(names).not.toContain("set_pixel");
     expect(names).not.toContain("create_layer");
     expect(names).not.toContain("save_sprite");
+    expect(names).not.toContain("export_animation");
     expect(names).not.toContain("apply_ordered_dither");
   });
 });

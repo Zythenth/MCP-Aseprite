@@ -9,7 +9,7 @@ export interface ToolRegistrationPolicy {
 export const MUTATING_TOOLS = new Set([
   "set_pixels", "set_pixel", "erase_pixels", "undo", "redo",
   "draw_line", "draw_rectangle", "draw_ellipse", "flood_fill", "replace_color",
-  "new_sprite", "save_sprite", "save_sprite_as", "save_project", "export_png", "export_sprite_sheet", "resize_canvas",
+  "new_sprite", "save_sprite", "save_sprite_as", "save_project", "export_png", "export_sprite_sheet", "export_animation", "resize_canvas",
   "create_layer", "rename_layer", "delete_layer", "set_layer_visibility", "set_layer_opacity", "move_layer",
   "create_group", "move_layer_to_group", "ungroup_layer", "set_layer_blend_mode", "merge_down_layer", "flatten_layers",
   "create_frame", "duplicate_frame", "delete_frame", "set_frame_duration", "create_tag",

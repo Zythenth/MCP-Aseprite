@@ -95,7 +95,7 @@ export declare const config: {
     readonly serverName: "aseprite-mcp";
     readonly serverVersion: "0.1.0";
     readonly protocolVersion: "2024-11-05";
-    readonly bridgeProtocolVersion: "1.1.0";
+    readonly bridgeProtocolVersion: "1.2.0";
 };
 export { getAllowedRoots, resolveProjectRoot };
 //# sourceMappingURL=config.d.ts.map

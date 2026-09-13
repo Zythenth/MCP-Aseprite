@@ -1735,6 +1735,44 @@ export class MockAsepriteEngine {
                 }, "tilemaps", frame.frameNumber);
             }
             // Frame tools
+            case "inspect_animation": {
+                const frames = this.frames.map((frame) => ({
+                    frameNumber: frame.frameNumber,
+                    durationMs: Math.round(frame.duration * 1000),
+                    celCount: [...this.cels.values()].filter((cel) => cel.frameNumber === frame.frameNumber).length,
+                }));
+                const layers = this.layers.map((layer) => {
+                    const celFrames = [...this.cels.values()]
+                        .filter((cel) => cel.layerIndex === layer.index)
+                        .map((cel) => cel.frameNumber)
+                        .sort((left, right) => left - right);
+                    return {
+                        uuid: `mock-layer-${layer.index}`,
+                        name: layer.name,
+                        path: layer.name,
+                        isVisible: layer.isVisible,
+                        opacity: layer.opacity,
+                        isGroup: layer.isGroup,
+                        isImage: !layer.isGroup && !layer.isTilemap,
+                        isTilemap: layer.isTilemap ?? false,
+                        celCount: celFrames.length,
+                        celFrames,
+                    };
+                });
+                return {
+                    success: true,
+                    width: this.width,
+                    height: this.height,
+                    colorMode: this.colorMode,
+                    frames,
+                    tags: this.tags.map((tag) => ({ ...tag })),
+                    layers,
+                    totalLayers: layers.length,
+                    totalCels: this.cels.size,
+                    totalDurationMs: frames.reduce((sum, frame) => sum + frame.durationMs, 0),
+                    revision: this.revision,
+                };
+            }
             case "list_frames":
                 return { frames: this.frames.map((f) => ({ ...f, durationMs: Math.round(f.duration * 1000) })) };
             case "select_frame": {
@@ -1837,14 +1875,19 @@ export class MockAsepriteEngine {
                 if (!["forward", "reverse", "pingpong", "pingpong_reverse"].includes(direction)) {
                     throw new Error(`Invalid tag direction: ${direction}`);
                 }
+                const repeats = params.repeats ?? 0;
+                if (!Number.isInteger(repeats) || repeats < 0 || repeats > 65535) {
+                    throw new Error("repeats must be an integer between 0 and 65535.");
+                }
                 this.tags.push({
                     name: params.name,
                     from,
                     to,
                     color: normalizedColor,
                     direction,
+                    repeats,
                 });
-                return this.finishMutation(params, { tag: params.name }, { x: 0, y: 0, width: this.width, height: this.height }, "tags");
+                return this.finishMutation(params, { tag: params.name, repeats }, { x: 0, y: 0, width: this.width, height: this.height }, "tags");
             }
             case "list_tags":
                 return {
@@ -1854,6 +1897,40 @@ export class MockAsepriteEngine {
                         toFrame: t.to,
                     })),
                 };
+            case "render_animation_gif": {
+                const frameNumbers = params.frameNumbers;
+                if (!Array.isArray(frameNumbers) || frameNumbers.length < 1 || frameNumbers.length > 64) {
+                    throw new Error("frameNumbers must contain between 1 and 64 entries.");
+                }
+                for (const frameNumber of frameNumbers)
+                    this.resolveTargetFrame(frameNumber);
+                const scale = params.scale ?? 1;
+                if (!Number.isInteger(scale) || scale < 1 || scale > 8) {
+                    throw new Error("scale must be an integer between 1 and 8.");
+                }
+                if (params.outputPath) {
+                    if (params.overwrite !== true && this.mockExistingFiles.has(params.outputPath)) {
+                        throw new Error(`File already exists and overwrite is false: ${params.outputPath}`);
+                    }
+                    this.mockExistingFiles.add(params.outputPath);
+                }
+                const durationsMs = frameNumbers.map((frameNumber) => Math.round(this.resolveTargetFrame(frameNumber).duration * 1000));
+                return {
+                    success: true,
+                    outputPath: params.outputPath,
+                    frameNumbers,
+                    durationsMs,
+                    totalDurationMs: durationsMs.reduce((sum, duration) => sum + duration, 0),
+                    width: this.width * scale,
+                    height: this.height * scale,
+                    scale,
+                    loop: params.loop === true,
+                    ...(params.outputPath ? {} : {
+                        gifBase64: "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+                        sizeBytes: 34,
+                    }),
+                };
+            }
             // File / Canvas tools
             case "open_sprite":
                 this.filename = params.filePath;
@@ -1912,6 +1989,9 @@ export class MockAsepriteEngine {
                 if (params.overwrite !== true && this.mockExistingFiles.has(params.outputPath)) {
                     throw new Error(`File already exists and overwrite is false: ${params.outputPath}`);
                 }
+                if (params.frameNumbers && (params.tagName || params.fromFrame !== undefined || params.toFrame !== undefined)) {
+                    throw new Error("frameNumbers is mutually exclusive with tagName/fromFrame/toFrame.");
+                }
                 if (params.tagName && (params.fromFrame !== undefined || params.toFrame !== undefined)) {
                     throw new Error("tagName is mutually exclusive with fromFrame/toFrame.");
                 }
@@ -1920,7 +2000,12 @@ export class MockAsepriteEngine {
                 }
                 let frameNumbers = [];
                 let tag;
-                if (params.tagName) {
+                if (params.frameNumbers) {
+                    if (!Array.isArray(params.frameNumbers))
+                        throw new Error("frameNumbers must be an array.");
+                    frameNumbers = params.frameNumbers.map((frameNumber) => this.resolveTargetFrame(frameNumber).frameNumber);
+                }
+                else if (params.tagName) {
                     tag = this.tags.find((item) => item.name === params.tagName);
                     if (!tag)
                         throw new Error(`Tag not found: ${params.tagName}`);
@@ -1942,7 +2027,7 @@ export class MockAsepriteEngine {
                     }
                     frameNumbers = Array.from({ length: to - from + 1 }, (_, index) => from + index);
                 }
-                if (frameNumbers.length > 256)
+                if (frameNumbers.length < 1 || frameNumbers.length > 256)
                     throw new Error("Export range must contain between 1 and 256 frames.");
                 if (params.layerNames) {
                     for (const name of params.layerNames) {

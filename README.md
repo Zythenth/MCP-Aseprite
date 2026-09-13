@@ -20,7 +20,7 @@ Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 - **Inspeção visual rica**: previews em PNG com escala nearest-neighbor, réguas de coordenadas e grades customizáveis.
 - **Leitura precisa de pixels**: formatos hexadecimal (`#RRGGBBAA`), RGBA, indexado e compacto otimizado para economia de tokens.
 - **Edição em lote e Undo atômico**: operações em lote agrupadas em uma única entrada de histórico de Undo.
-- **92 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, revisão visual e análise de pixel art.
+- **95 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, preview animado, revisão visual e análise de pixel art.
 - **Estrutura nativa do Aseprite**: cels vinculados, grupos aninhados, pivôs/nine-patch, blend modes, merge/flatten e exportação avançada por tag, intervalo e camada.
 - **Ciclo visual incremental**: preview opcional após mutações, filmstrip, onion skin, comparação exata entre frames, checkpoints e histórico de alterações por revisão.
 - **Qualidade de pixel art**: lint heurístico, CIEDE2000, análise de paleta, rampas com hue shift e dithering Bayer determinístico.
@@ -259,7 +259,7 @@ No Windows via PowerShell:
 
 ## Resumo das Ferramentas MCP
 
-O conjunto completo contém **92 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
+O conjunto completo contém **95 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
 
 ### Inspeção Visual e Leitura
 - `aseprite_status`: Estado da conexão, arquivo ativo, tamanho do canvas, camada e frame selecionados e revisão atual.
@@ -286,8 +286,10 @@ O conjunto completo contém **92 ferramentas únicas**. Para reduzir o contexto 
 ### Frames, tags e inspeção de animação
 
 - Frames/tags: `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `delete_frame`, `set_frame_duration`, `create_tag`, `list_tags`.
-- Revisão: `get_onion_skin`, `get_filmstrip`, `compare_frames`.
-- Tags aceitam `forward`, `reverse`, `pingpong` e `pingpong_reverse`.
+- Revisão: `get_onion_skin`, `get_filmstrip`, `compare_frames`, `inspect_animation`, `render_animation_preview`.
+- `inspect_animation` combina frames, durações, tags, repetição, ordem efetiva de playback, camadas e cobertura de cels em uma resposta estruturada.
+- `render_animation_preview` retorna primeiro um GIF reproduzível e depois um contact sheet PNG na mesma ordem temporal, com `previewId`, timing, FPS médio e revisão observada.
+- Tags aceitam `forward`, `reverse`, `pingpong` e `pingpong_reverse`; `repeats: 0` representa loop contínuo.
 
 ### Cels, slices e seleções
 
@@ -313,6 +315,8 @@ O conjunto completo contém **92 ferramentas únicas**. Para reduzir o contexto 
 - `load_reference_image`: retorna a imagem de referência, dimensões, formato, transparência, hash e análise de paleta sem trocar o sprite ativo.
 - `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `save_project`, `export_png`, `resize_canvas`.
 - `export_sprite_sheet`: exporta por tag ou intervalo explícito, filtra camadas e organiza frames horizontalmente, verticalmente ou em grade, respeitando direção da tag, escala, espaçamento e no-clobber.
+- `export_animation`: exporta a ordem efetiva de uma tag ou intervalo como GIF, spritesheet, sequência PNG ou PNG único. A sequência PNG usa nomes determinísticos e remove arquivos novos já escritos se uma execução no-clobber falhar parcialmente.
+- APNG é rejeitado com mensagem explícita porque o bridge/Aseprite atual não oferece esse encoder; nenhum PNG estático é apresentado falsamente como APNG.
 
 Ferramentas destrutivas exigem `confirm: true`; gravações em caminho existente exigem `overwrite: true`. Mutações com `returnPreview: true` retornam a imagem como conteúdo MCP sem repetir o base64 no bloco textual.
 

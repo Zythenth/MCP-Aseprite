@@ -70,6 +70,8 @@ export class MockClient {
                         capabilities: {
                             mock: true,
                             changeJournal: true,
+                            animationGif: true,
+                            animationInspection: true,
                             referenceImageDecode: true,
                         },
                     },

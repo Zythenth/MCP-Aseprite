@@ -5,7 +5,7 @@
 -- ==============================================================================
 
 local DEFAULT_PORT = 32123
-local BRIDGE_PROTOCOL_VERSION = "1.1.0"
+local BRIDGE_PROTOCOL_VERSION = "1.2.0"
 
 local function parseEnvPort()
   local function getTrimmed(varName)
@@ -710,6 +710,126 @@ local function exportImagePngBase64(image, sprite)
   file:close()
   os.remove(tempPath)
   return base64Encode(bytes)
+end
+
+local function renderAnimationGif(params)
+  local sourceSprite = app.sprite
+  if not sourceSprite then error("No active sprite.") end
+  if type(params.frameNumbers) ~= "table" or #params.frameNumbers < 1 or #params.frameNumbers > 64 then
+    error("frameNumbers must contain between 1 and 64 entries.")
+  end
+  local scale = params.scale or 1
+  if type(scale) ~= "number" or math.floor(scale) ~= scale or scale < 1 or scale > 8 then
+    error("scale must be an integer between 1 and 8.")
+  end
+  local outputWidth = sourceSprite.width * scale
+  local outputHeight = sourceSprite.height * scale
+  if outputWidth > 4096 or outputHeight > 4096 or outputWidth * outputHeight * #params.frameNumbers > 67108864 then
+    error("Animation GIF exceeds the dimension or aggregate pixel safety limit.")
+  end
+
+  local outputPath = params.outputPath
+  local temporary = outputPath == nil
+  if temporary then
+    outputPath = app.fs.joinPath(app.fs.tempPath,
+      string.format("ase_mcp_animation_%d_%d.gif", os.time(), math.random(1000, 9999)))
+  elseif type(outputPath) ~= "string" or #outputPath == 0 then
+    error("outputPath must be a non-empty string when provided.")
+  elseif params.overwrite ~= true then
+    local existing = io.open(outputPath, "rb")
+    if existing then existing:close(); error("File already exists and overwrite is false: " .. tostring(outputPath)) end
+  end
+
+  local originalFrameNumber = app.frame and app.frame.frameNumber or 1
+  local originalLayer = app.layer
+  local previewSprite = nil
+  local ok, resultOrError = pcall(function()
+    previewSprite = Sprite(outputWidth, outputHeight, ColorMode.RGB)
+    local previewLayer = previewSprite.layers[1]
+    previewLayer.name = "Animation Preview"
+    local durationsMs = {}
+    local totalDurationMs = 0
+
+    for sequenceIndex, rawFrameNumber in ipairs(params.frameNumbers) do
+      if type(rawFrameNumber) ~= "number" or math.floor(rawFrameNumber) ~= rawFrameNumber
+        or rawFrameNumber < 1 or rawFrameNumber > #sourceSprite.frames then
+        error("Invalid source frame in frameNumbers: " .. tostring(rawFrameNumber))
+      end
+      local sourceFrame = sourceSprite.frames[rawFrameNumber]
+      local targetFrame = sequenceIndex == 1 and previewSprite.frames[1]
+        or previewSprite:newEmptyFrame(sequenceIndex)
+      local frameImage = Image(ImageSpec{
+        width = sourceSprite.width,
+        height = sourceSprite.height,
+        colorMode = ColorMode.RGB,
+        transparentColor = 0
+      })
+      frameImage:clear(app.pixelColor.rgba(0, 0, 0, 0))
+      frameImage:drawSprite(sourceSprite, rawFrameNumber, Point(0, 0))
+      if scale > 1 then frameImage:resize{ width = outputWidth, height = outputHeight } end
+      local existingCel = previewLayer:cel(targetFrame)
+      if existingCel then
+        existingCel.image = frameImage
+        existingCel.position = Point(0, 0)
+      else
+        previewSprite:newCel(previewLayer, targetFrame, frameImage, Point(0, 0))
+      end
+      targetFrame.duration = sourceFrame.duration
+      local durationMs = math.floor((sourceFrame.duration or 0.1) * 1000)
+      table.insert(durationsMs, durationMs)
+      totalDurationMs = totalDurationMs + durationMs
+    end
+
+    local previewTag = previewSprite:newTag(1, #previewSprite.frames)
+    previewTag.name = params.tagName or "MCP Preview"
+    previewTag.aniDir = AniDir.FORWARD
+    previewTag.repeats = params.loop == true and 0 or 1
+    if not temporary and params.overwrite ~= true then
+      local existing = io.open(outputPath, "rb")
+      if existing then existing:close(); error("File appeared before export and overwrite is false: " .. tostring(outputPath)) end
+    end
+    previewSprite:saveAs(outputPath)
+    if not app.fs.isFile(outputPath) then error("Aseprite did not create the GIF output.") end
+
+    local result = {
+      success = true,
+      outputPath = temporary and nil or outputPath,
+      frameNumbers = params.frameNumbers,
+      durationsMs = durationsMs,
+      totalDurationMs = totalDurationMs,
+      width = outputWidth,
+      height = outputHeight,
+      scale = scale,
+      loop = params.loop == true
+    }
+    if temporary then
+      local file = io.open(outputPath, "rb")
+      if not file then error("Failed to read temporary animation GIF.") end
+      local sizeBytes = file:seek("end")
+      if not sizeBytes or sizeBytes > 10485760 then
+        file:close()
+        error("Animation preview GIF exceeds the 10 MiB response limit.")
+      end
+      file:seek("set", 0)
+      local bytes = file:read("*all")
+      file:close()
+      result.gifBase64 = base64Encode(bytes)
+      result.sizeBytes = sizeBytes
+    end
+    return result
+  end)
+
+  if previewSprite then pcall(function() previewSprite:close() end) end
+  if sourceSprite then
+    pcall(function()
+      app.sprite = sourceSprite
+      app.frame = sourceSprite.frames[math.min(originalFrameNumber, #sourceSprite.frames)]
+      if originalLayer then app.layer = originalLayer end
+    end)
+  end
+  if temporary then pcall(function() os.remove(outputPath) end) end
+  if not ok then error(resultOrError) end
+  return resultOrError
 end
 
 -- ------------------------------------------------------------------------------
@@ -2603,6 +2723,91 @@ handlers.set_tiles = function(params)
 end
 
 -- Frame tools
+handlers.inspect_animation = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if #spr.frames > 1024 then error("Animation inspection is limited to 1,024 frames.") end
+
+  local frameCelCounts = {}
+  for frameNumber = 1, #spr.frames do frameCelCounts[frameNumber] = 0 end
+  local totalLayers = 0
+  local totalCels = 0
+  local function visit(container, parentPath)
+    local nodes = {}
+    for _, layer in ipairs(container.layers or {}) do
+      totalLayers = totalLayers + 1
+      if totalLayers > 512 then error("Animation inspection is limited to 512 layers.") end
+      local layerPath = parentPath == "" and layer.name or (parentPath .. "/" .. layer.name)
+      local node = {
+        uuid = tostring(layer.uuid or ""),
+        name = layer.name,
+        path = layerPath,
+        isVisible = layer.isVisible,
+        opacity = layer.opacity or 255,
+        isGroup = layer.isGroup,
+        isImage = layer.isImage,
+        isTilemap = layer.isTilemap,
+        celCount = 0,
+        celFrames = {}
+      }
+      if layer.isGroup then
+        node.children = visit(layer, layerPath)
+      else
+        for _, cel in ipairs(layer.cels or {}) do
+          totalCels = totalCels + 1
+          if totalCels > 100000 then error("Animation inspection is limited to 100,000 cels.") end
+          node.celCount = node.celCount + 1
+          table.insert(node.celFrames, cel.frame.frameNumber)
+          frameCelCounts[cel.frame.frameNumber] = (frameCelCounts[cel.frame.frameNumber] or 0) + 1
+        end
+      end
+      table.insert(nodes, node)
+    end
+    return nodes
+  end
+  local layers = visit(spr, "")
+
+  local frames = {}
+  local totalDurationMs = 0
+  for _, frame in ipairs(spr.frames) do
+    local durationMs = math.floor((frame.duration or 0.1) * 1000)
+    totalDurationMs = totalDurationMs + durationMs
+    table.insert(frames, {
+      frameNumber = frame.frameNumber,
+      durationMs = durationMs,
+      celCount = frameCelCounts[frame.frameNumber] or 0
+    })
+  end
+  local tags = {}
+  for _, tag in ipairs(spr.tags) do
+    local direction = "forward"
+    if tag.aniDir == AniDir.REVERSE then direction = "reverse"
+    elseif tag.aniDir == AniDir.PING_PONG then direction = "pingpong"
+    elseif tag.aniDir == AniDir.PING_PONG_REVERSE then direction = "pingpong_reverse" end
+    table.insert(tags, {
+      name = tag.name,
+      from = tag.fromFrame.frameNumber,
+      to = tag.toFrame.frameNumber,
+      direction = direction,
+      repeats = tag.repeats or 0,
+      color = tag.color and string.format("#%02X%02X%02X%02X", tag.color.red, tag.color.green, tag.color.blue, tag.color.alpha) or nil
+    })
+  end
+  return {
+    success = true,
+    width = spr.width,
+    height = spr.height,
+    colorMode = getColorModeString(spr.colorMode),
+    frames = frames,
+    tags = tags,
+    layers = layers,
+    totalLayers = totalLayers,
+    totalCels = totalCels,
+    totalDurationMs = totalDurationMs,
+    revision = state.revision
+  }
+end
+
 handlers.list_frames = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
@@ -2726,6 +2931,11 @@ handlers.create_tag = function(params)
     local direction = params.direction or "forward"
     if not directions[direction] then error("Invalid tag direction: " .. tostring(direction)) end
     t.aniDir = directions[direction]
+    local repeats = params.repeats or 0
+    if type(repeats) ~= "number" or math.floor(repeats) ~= repeats or repeats < 0 or repeats > 65535 then
+      error("repeats must be an integer between 0 and 65535.")
+    end
+    t.repeats = repeats
     if params.color then
       local rgba = parseHexRgba(params.color)
       t.color = Color{ r = rgba.r, g = rgba.g, b = rgba.b, a = rgba.a }
@@ -2733,7 +2943,7 @@ handlers.create_tag = function(params)
     return t
   end)
 
-  return finishMutation(params, { tag = tag.name }, "tags", rectToTable(spr.bounds), nil, false)
+  return finishMutation(params, { tag = tag.name, repeats = tag.repeats or 0 }, "tags", rectToTable(spr.bounds), nil, false)
 end
 
 handlers.list_tags = function(params)
@@ -2750,11 +2960,16 @@ handlers.list_tags = function(params)
       from = t.fromFrame.frameNumber,
       to = t.toFrame.frameNumber,
       color = t.color and string.format("#%02X%02X%02X%02X", t.color.red, t.color.green, t.color.blue, t.color.alpha) or nil,
-      direction = direction
+      direction = direction,
+      repeats = t.repeats or 0
     }
     table.insert(tags, item)
   end
   return { tags = tags }
+end
+
+handlers.render_animation_gif = function(params)
+  return renderAnimationGif(params or {})
 end
 
 -- File / Canvas tools
@@ -2891,7 +3106,19 @@ handlers.export_sprite_sheet = function(params)
 
   local frameNumbers = {}
   local selectedTag = nil
-  if params.tagName then
+  if params.frameNumbers then
+    if params.tagName or params.fromFrame or params.toFrame then
+      error("frameNumbers is mutually exclusive with tagName/fromFrame/toFrame.")
+    end
+    if type(params.frameNumbers) ~= "table" then error("frameNumbers must be an array.") end
+    for _, frameNumber in ipairs(params.frameNumbers) do
+      if type(frameNumber) ~= "number" or math.floor(frameNumber) ~= frameNumber
+        or frameNumber < 1 or frameNumber > #spr.frames then
+        error("Invalid frame in frameNumbers: " .. tostring(frameNumber))
+      end
+      table.insert(frameNumbers, frameNumber)
+    end
+  elseif params.tagName then
     if params.fromFrame or params.toFrame then error("tagName is mutually exclusive with fromFrame/toFrame.") end
     for _, tag in ipairs(spr.tags) do if tag.name == params.tagName then selectedTag = tag; break end end
     if not selectedTag then error("Tag not found: " .. tostring(params.tagName)) end
@@ -3104,6 +3331,8 @@ local function initWebSocket(dlg)
               changeJournal = true,
               frameEvents = true,
               layerEvents = true,
+              animationGif = true,
+              animationInspection = true,
               referenceImageDecode = true,
               safeJson = true
             }

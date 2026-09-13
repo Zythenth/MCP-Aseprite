@@ -473,6 +473,42 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(body).toContain("height = rh");
     });
 
+    it("validates animation inspection and GIF rendering are bounded, preserve timing, and restore editor state", () => {
+      const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
+      const luaContent = fs.readFileSync(luaPath, "utf-8");
+
+      const inspectMatch = /handlers\.inspect_animation\s*=\s*function\s*\(params\)([\s\S]*?)(?:\n\s*handlers\.|\n\s*--)/.exec(luaContent);
+      expect(inspectMatch).not.toBeNull();
+      const inspectBody = inspectMatch![1];
+      expect(inspectBody).toContain("#spr.frames > 1024");
+      expect(inspectBody).toContain("totalLayers > 512");
+      expect(inspectBody).toContain("totalCels > 100000");
+      expect(inspectBody).toMatch(/local\s+function\s+visit\s*\(container,\s*parentPath\)/);
+      expect(inspectBody).toContain("node.children = visit(layer, layerPath)");
+      expect(inspectBody).toContain("durationMs = durationMs");
+      expect(inspectBody).toContain("repeats = tag.repeats or 0");
+      expect(inspectBody).toContain("totalDurationMs = totalDurationMs");
+
+      expect(luaContent).toMatch(/handlers\.render_animation_gif\s*=\s*function/);
+      const helperMatch = /local\s+function\s+renderAnimationGif\s*\(params\)([\s\S]*?)(?=\n\s*-- -+\n\s*-- Helper: Ensure Canvas-Sized Cel)/.exec(luaContent);
+      expect(helperMatch).not.toBeNull();
+      const helperBody = helperMatch![1];
+      expect(helperBody).toContain("#params.frameNumbers > 64");
+      expect(helperBody).toContain("scale > 8");
+      expect(helperBody).toContain("67108864");
+      expect(helperBody).toContain("10485760");
+      expect(helperBody).toContain("frameImage:drawSprite(sourceSprite, rawFrameNumber");
+      expect(helperBody).toContain("targetFrame.duration = sourceFrame.duration");
+      expect(helperBody).toContain("previewTag.repeats = params.loop == true and 0 or 1");
+      expect(helperBody).toContain("File appeared before export and overwrite is false");
+      expect(helperBody).toContain('file:seek("end")');
+      expect(helperBody).toContain('file:seek("set", 0)');
+      expect(helperBody).toContain("previewSprite:close()");
+      expect(helperBody).toContain("app.sprite = sourceSprite");
+      expect(helperBody).toContain("app.frame = sourceSprite.frames");
+      expect(helperBody).toContain("os.remove(outputPath)");
+    });
+
     it("validates file operation handlers enforce strict path matching and no-clobber rules", () => {
       const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
       const luaContent = fs.readFileSync(luaPath, "utf-8");

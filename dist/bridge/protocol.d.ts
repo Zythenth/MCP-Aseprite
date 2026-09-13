@@ -6,7 +6,7 @@
 export declare const DEFAULT_BRIDGE_PORT = 32123;
 export declare const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 export declare const DEFAULT_COMMAND_TIMEOUT_MS = 8000;
-export declare const BRIDGE_PROTOCOL_VERSION = "1.1.0";
+export declare const BRIDGE_PROTOCOL_VERSION = "1.2.0";
 export declare function isBridgeProtocolCompatible(version: unknown): version is string;
 export declare enum BridgeErrorCode {
     NO_ACTIVE_SPRITE = "NO_ACTIVE_SPRITE",

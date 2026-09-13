@@ -128,6 +128,7 @@ export function registerFrameTools(
       toFrame: z.number().int().positive().describe("End frame number"),
       color: z.string().optional().describe("Optional UI color for tag"),
       direction: z.enum(["forward", "reverse", "pingpong", "pingpong_reverse"]).optional().default("forward").describe("Playback direction for the tag"),
+      repeats: z.number().int().min(0).max(65535).optional().default(0).describe("Playback repetitions; 0 means continuous looping"),
       returnPreview: z.boolean().optional().default(false),
     },
     async (params) => {

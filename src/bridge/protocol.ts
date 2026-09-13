@@ -7,7 +7,7 @@
 export const DEFAULT_BRIDGE_PORT = 32123;
 export const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 export const DEFAULT_COMMAND_TIMEOUT_MS = 8000;
-export const BRIDGE_PROTOCOL_VERSION = "1.1.0";
+export const BRIDGE_PROTOCOL_VERSION = "1.2.0";
 
 export function isBridgeProtocolCompatible(version: unknown): version is string {
   if (typeof version !== "string") return false;
