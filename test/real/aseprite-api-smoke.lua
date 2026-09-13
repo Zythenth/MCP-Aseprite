@@ -90,7 +90,10 @@ sprite.selection:deselect()
 sprite:saveAs(output)
 check(app.fs.isFile(output), "real Aseprite did not write the fixture")
 local referenceOutput = output .. ".png"
-sprite:saveCopyAs(referenceOutput)
+local referenceImage = Image(sprite.spec)
+referenceImage:clear(app.pixelColor.rgba(0, 0, 0, 0))
+referenceImage:drawSprite(sprite, 1, Point(0, 0))
+referenceImage:saveAs(referenceOutput)
 check(app.fs.isFile(referenceOutput), "real Aseprite did not write the reference PNG")
 local loadedReference = Image{ fromFile = referenceOutput }
 check(loadedReference and loadedReference.width == sprite.width and loadedReference.height == sprite.height,
