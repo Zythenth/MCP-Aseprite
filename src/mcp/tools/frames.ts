@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
-import { bridgeToolResult, confirmationError } from "./common.js";
+import { bridgeToolError, bridgeToolResult, confirmationError, requireBridgeCapability } from "./common.js";
 
 export function registerFrameTools(
   server: McpServer,
@@ -153,6 +153,92 @@ export function registerFrameTools(
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: err.message }, null, 2) }], isError: true };
       }
+    }
+  );
+
+  server.tool(
+    "move_frame",
+    "Moves one complete frame to a new timeline position and shifts intervening frames in one Undo transaction.",
+    {
+      fromFrame: z.number().int().positive(),
+      toFrame: z.number().int().positive(),
+      returnPreview: z.boolean().optional().default(false),
+    },
+    async (params) => {
+      try {
+        requireBridgeCapability(stateTracker, "timelineEditing");
+        return bridgeToolResult(await dispatcher.send("move_frame", params, 15000), stateTracker, params.returnPreview);
+      } catch (error) { return bridgeToolError(error); }
+    }
+  );
+
+  server.tool(
+    "set_frame_durations",
+    "Sets up to 256 frame durations atomically, useful for timing and spacing passes. Accepts either Mode A (explicit 'durations' list) or Mode B (range via 'fromFrame', 'toFrame', and 'durationMs').",
+    {
+      durations: z.array(z.object({
+        frameNumber: z.number().int().positive(),
+        durationMs: z.number().int().min(1).max(60000),
+      })).min(1).max(256).optional().describe("Mode A: Explicit list of frame numbers and durations (1-256 items)."),
+      fromFrame: z.number().int().positive().optional().describe("Mode B: Start frame number (inclusive) of the range."),
+      toFrame: z.number().int().positive().optional().describe("Mode B: End frame number (inclusive) of the range."),
+      durationMs: z.number().int().min(1).max(60000).optional().describe("Mode B: Duration in milliseconds for all frames in the range."),
+      returnPreview: z.boolean().optional().default(false),
+    },
+    async (params) => {
+      try {
+        const hasDurations = params.durations !== undefined;
+        const hasRangePart = params.fromFrame !== undefined || params.toFrame !== undefined || params.durationMs !== undefined;
+        if (hasDurations && hasRangePart) {
+          throw new Error("Cannot mix 'durations' and range parameters ('fromFrame', 'toFrame', 'durationMs'). Provide exactly one mode.");
+        }
+        if (!hasDurations && !hasRangePart) {
+          throw new Error("Must provide either 'durations' (Mode A) or 'fromFrame', 'toFrame', and 'durationMs' (Mode B).");
+        }
+        if (hasRangePart && (params.fromFrame === undefined || params.toFrame === undefined || params.durationMs === undefined)) {
+          throw new Error("Range mode requires all of 'fromFrame', 'toFrame', and 'durationMs'.");
+        }
+        requireBridgeCapability(stateTracker, "timelineEditing");
+        return bridgeToolResult(await dispatcher.send("set_frame_durations", params, 10000), stateTracker, params.returnPreview);
+      } catch (error) { return bridgeToolError(error); }
+    }
+  );
+
+  server.tool(
+    "update_tag",
+    "Updates an existing animation tag's name, range, direction, repeats, or UI color atomically.",
+    {
+      name: z.string().min(1).max(128).describe("Exact current tag name"),
+      newName: z.string().min(1).max(128).optional(),
+      fromFrame: z.number().int().positive().optional(),
+      toFrame: z.number().int().positive().optional(),
+      color: z.string().regex(/^#[0-9a-f]{6}([0-9a-f]{2})?$/i).optional(),
+      direction: z.enum(["forward", "reverse", "pingpong", "pingpong_reverse"]).optional(),
+      repeats: z.number().int().min(0).max(65535).optional(),
+      returnPreview: z.boolean().optional().default(false),
+    },
+    async (params) => {
+      try {
+        requireBridgeCapability(stateTracker, "timelineEditing");
+        return bridgeToolResult(await dispatcher.send("update_tag", params, 10000), stateTracker, params.returnPreview);
+      } catch (error) { return bridgeToolError(error); }
+    }
+  );
+
+  server.tool(
+    "delete_tag",
+    "Deletes an animation tag without deleting its frames. Requires confirm: true.",
+    {
+      name: z.string().min(1).max(128),
+      confirm: z.boolean(),
+      returnPreview: z.boolean().optional().default(false),
+    },
+    async (params) => {
+      if (!params.confirm) return confirmationError("delete_tag");
+      try {
+        requireBridgeCapability(stateTracker, "timelineEditing");
+        return bridgeToolResult(await dispatcher.send("delete_tag", params, 10000), stateTracker, params.returnPreview);
+      } catch (error) { return bridgeToolError(error); }
     }
   );
 }

@@ -126,4 +126,21 @@ describe("MockAsepriteEngine Unit Tests", () => {
     expect(Array.isArray(compactGrid.palette)).toBe(true);
     expect(typeof compactGrid.grid[5][5]).toBe("number");
   });
+
+  it("should return cel metadata on non-group layers in inspect_animation", () => {
+    const inspection = engine.executeCommand("inspect_animation", {});
+    expect(inspection.success).toBe(true);
+    expect(Array.isArray(inspection.layers)).toBe(true);
+    expect(inspection.layers.length).toBeGreaterThan(0);
+    const layer = inspection.layers[0];
+    expect(Array.isArray(layer.cels)).toBe(true);
+    expect(layer.cels.length).toBe(1);
+    expect(layer.cels[0]).toMatchObject({
+      frameNumber: 1,
+      x: 0,
+      y: 0,
+      bounds: { x: 0, y: 0, width: 32, height: 32 },
+      position: { x: 0, y: 0 },
+    });
+  });
 });

@@ -17,9 +17,12 @@ import { registerSliceTools } from "./tools/slices.js";
 import { registerSelectionTools } from "./tools/selection.js";
 import { registerTileTools } from "./tools/tiles.js";
 import { registerAnimationInspectionTools } from "./tools/animation.js";
+import { registerBatchTools } from "./tools/batch.js";
+import { registerWorkflowTools } from "./tools/workflow.js";
 import { registerPixelArtTools } from "./tools/pixelArt.js";
 import { registerReviewTools } from "./tools/review.js";
 import { ReviewState } from "./reviewState.js";
+import { AnimationWorkflowState } from "./animationWorkflowState.js";
 import { createPolicyToolRegistrar } from "./toolPolicy.js";
 import type { Toolset } from "../config.js";
 import { registerMcpResources } from "./resources/index.js";
@@ -35,6 +38,7 @@ export function createMcpServer(
   const activeDispatcher = dispatcher || new CommandDispatcher();
   const activeStateTracker = stateTracker || new BridgeState();
   const reviewState = new ReviewState();
+  const workflowState = new AnimationWorkflowState(activeStateTracker);
   const readOnly = options.readOnly ?? config.readOnly;
   const enabledToolsets = new Set(options.toolsets ?? [...config.toolsets]);
 
@@ -57,7 +61,7 @@ export function createMcpServer(
   registerStatusTool(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("visual")) registerVisualTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("editing")) registerEditingTools(toolRegistrar, activeDispatcher, activeStateTracker);
-  if (enabledToolsets.has("files")) registerFileTools(toolRegistrar, activeDispatcher, activeStateTracker);
+  if (enabledToolsets.has("files")) registerFileTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
   if (enabledToolsets.has("shapes")) registerShapeTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("layers")) registerLayerTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("frames")) registerFrameTools(toolRegistrar, activeDispatcher, activeStateTracker);
@@ -66,7 +70,11 @@ export function createMcpServer(
   if (enabledToolsets.has("slices")) registerSliceTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("selection")) registerSelectionTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("tiles")) registerTileTools(toolRegistrar, activeDispatcher, activeStateTracker);
-  if (enabledToolsets.has("animation")) registerAnimationInspectionTools(toolRegistrar, activeDispatcher, activeStateTracker);
+  if (enabledToolsets.has("animation")) {
+    registerAnimationInspectionTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
+    registerBatchTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    registerWorkflowTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
+  }
   if (enabledToolsets.has("pixel-art")) registerPixelArtTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);
   if (enabledToolsets.has("review")) registerReviewTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);
 

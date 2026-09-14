@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { BridgeState } from "../../src/bridge/state.js";
+import {
+  AnimationWorkflowState,
+  ANIMATION_WORKFLOW_22_CATEGORIES,
+} from "../../src/mcp/animationWorkflowState.js";
 import { registerFileTools } from "../../src/mcp/tools/files.js";
 
 function parseText(result: any): any {
@@ -13,8 +18,11 @@ describe("export_animation", () => {
   let originalAllowed: string | undefined;
   let originalProjectRoot: string | undefined;
   let handler: (params: any) => Promise<any>;
+  let saveProjectHandler: (params: any) => Promise<any>;
   let commands: Array<{ command: string; params: any }>;
   let failSequenceAt: number | null;
+  let stateTracker: BridgeState;
+  let workflowState: AnimationWorkflowState;
 
   beforeEach(() => {
     originalAllowed = process.env.ASEPRITE_ALLOWED_PATHS;
@@ -52,6 +60,7 @@ describe("export_animation", () => {
         if (command === "inspect_animation") return inspection;
         if (command === "render_animation_gif") return { success: true, outputPath: params.outputPath };
         if (command === "export_sprite_sheet") return { success: true, outputPath: params.outputPath, frameNumbers: params.frameNumbers };
+        if (command === "save_sprite_as") return { success: true, filePath: params.filePath };
         if (command === "export_png") {
           pngCall++;
           if (failSequenceAt === pngCall) throw new Error("simulated export failure");
@@ -61,13 +70,30 @@ describe("export_animation", () => {
         throw new Error(`Unexpected command: ${command}`);
       },
     };
-    const state: any = {
-      getCapabilities: () => ({ animationGif: true, animationInspection: true }),
-      getRevision: () => 4,
-      setRevision: () => {},
-    };
-    registerFileTools(server, dispatcher, state);
+    stateTracker = new BridgeState();
+    stateTracker.setConnected(true, "127.0.0.1");
+    stateTracker.handleHello({
+      bridgeProtocolVersion: "1.0.0",
+      asepriteVersion: "1.3",
+      apiVersion: 1,
+      sessionId: "session_abc",
+      revision: 4,
+      capabilities: { animationGif: true, animationInspection: true },
+    });
+    stateTracker.updateActiveSprite({
+      filename: "hero.aseprite",
+      width: 16,
+      height: 16,
+      colorMode: "rgb",
+      layersCount: 1,
+      framesCount: 3,
+      activeLayer: "Layer 1",
+      activeFrame: 1,
+    });
+    workflowState = new AnimationWorkflowState(stateTracker);
+    registerFileTools(server, dispatcher, stateTracker, workflowState);
     handler = tools.get("export_animation")!;
+    saveProjectHandler = tools.get("save_project")!;
   });
 
   afterEach(() => {
@@ -138,5 +164,41 @@ describe("export_animation", () => {
     expect(existing.isError).toBe(true);
     expect(parseText(existing).error).toMatch(/already exists/i);
     expect(commands.at(-1)?.command).toBe("inspect_animation");
+  });
+
+  it("keeps ordinary and non-strict final exports usable without a workflow", async () => {
+    const ordinary = await handler({ format: "png", outputPath: "exports/ordinary.png" });
+    expect(ordinary.isError).toBeUndefined();
+
+    const final = await handler({ format: "png", outputPath: "exports/final.png", final: true });
+    expect(final.isError).toBeUndefined();
+    expect(parseText(final).completionEvidence).toBeUndefined();
+    expect(commands.filter(({ command }) => command === "inspect_animation")).toHaveLength(2);
+  });
+
+  it("blocks strict final export without a workflow before any dispatcher command", async () => {
+    const before = commands.length;
+    const result = await handler({
+      format: "gif",
+      outputPath: "exports/final.gif",
+      final: true,
+      strictWorkflowValidation: true,
+    });
+    const payload = parseText(result);
+
+    expect(result.isError).toBe(true);
+    expect(payload.code).toBe("WORKFLOW_COMPLETION_REQUIRED");
+    expect(payload.failedGateNames).toContain("workflowExists");
+    expect(payload.currentRevision).toBe(4);
+    expect(commands).toHaveLength(before);
+  });
+
+  it("does not apply final-export gates to save_project", async () => {
+    const save = await saveProjectHandler({ filePath: "exports/hero.aseprite" });
+    expect(save.isError).toBeUndefined();
+    expect(commands.at(-1)).toMatchObject({
+      command: "save_sprite_as",
+      params: { filePath: path.join(root, "exports", "hero.aseprite") },
+    });
   });
 });

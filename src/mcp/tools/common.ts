@@ -34,3 +34,11 @@ export function confirmationError(operation: string): any {
     isError: true,
   };
 }
+
+export function requireBridgeCapability(state: BridgeState, capability: string): void {
+  if (!state.getCapabilities()[capability]) {
+    throw new Error(
+      `The connected Aseprite bridge does not advertise '${capability}'. Reinstall the bundled Lua bridge.`
+    );
+  }
+}

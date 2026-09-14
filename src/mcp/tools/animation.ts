@@ -1,17 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
 import { composeFilmstrip, composeOnionSkin, compareFrames } from "../../image/animation.js";
 import { decodePngBase64Sync, encodeRgbaToPngBase64, type ImageBuffer } from "../../image/png.js";
 import { scaleNearestNeighbor } from "../../image/scaling.js";
 import {
+  computeCanonicalTemporalHash,
+  analyzeAnimationTemporalPure,
+  MAX_ANALYSIS_FRAMES,
+  MAX_RIGID_REGIONS,
+  MAX_CONTACT_POINTS,
+} from "../../image/temporalAnalysis.js";
+import {
   resolveAnimationPlayback,
   type AnimationDirection,
   type AnimationInspection,
 } from "../animationSelection.js";
-import { bridgeToolError } from "./common.js";
+import { bridgeToolError, requireBridgeCapability } from "./common.js";
+import type { AnimationWorkflowState } from "../animationWorkflowState.js";
 
 const MAX_FILMSTRIP_FRAMES = 64;
 const MAX_RENDERED_PIXELS = 16_777_216;
@@ -82,9 +90,7 @@ function imageToolResult(image: ImageBuffer, metadata: Record<string, unknown>):
 }
 
 function requireAnimationCapability(state: BridgeState, name: "animationGif" | "animationInspection"): void {
-  if (!state.getCapabilities()[name]) {
-    throw new Error(`The connected Aseprite bridge does not advertise '${name}'. Reinstall the bundled Lua bridge.`);
-  }
+  requireBridgeCapability(state, name);
 }
 
 async function fetchAnimationInspection(
@@ -131,7 +137,8 @@ function animationSelectionSchema(): Record<string, z.ZodTypeAny> {
 export function registerAnimationInspectionTools(
   server: McpServer,
   dispatcher: CommandDispatcher,
-  state: BridgeState
+  state: BridgeState,
+  workflowState?: AnimationWorkflowState
 ): void {
   server.tool(
     "inspect_animation",
@@ -235,19 +242,217 @@ export function registerAnimationInspectionTools(
         const filmstrip = composeFilmstrip(frames.map((frame) => scaledImage(frame, filmstripScale)), columns, gap);
         const encodedFilmstrip = encodeRgbaToPngBase64(filmstrip.data, filmstrip.width, filmstrip.height);
         const previewId = createHash("sha256").update(gifBytes).digest("hex");
+        const effectiveRevision = inspection.revision ?? state.getRevision();
+        const temporalHash = computeCanonicalTemporalHash(
+          inspection.width,
+          inspection.height,
+          playback.frameNumbers,
+          playback.frames.map((f) => f.durationMs),
+          frames
+        );
+
+        if (workflowState) {
+          workflowState.registerPreview({
+            previewId,
+            revision: effectiveRevision,
+            temporalHash,
+            playback: {
+              frameNumbers: playback.frameNumbers,
+              tagName: playback.tagName ?? undefined,
+              loop,
+            },
+            recordedAt: new Date().toISOString(),
+          });
+        }
+
         return { content: [
           { type: "image" as const, data: gif.gifBase64, mimeType: "image/gif" },
           { type: "image" as const, data: encodedFilmstrip.base64, mimeType: "image/png" },
           { type: "text" as const, text: JSON.stringify({
             success: true,
             previewId,
+            temporalHash,
             contentOrder: ["playableGif", "contactSheet", "metadata"],
             playback: { ...playback, loop },
             gif: { width: gif.width, height: gif.height, scale, sizeBytes: gifBytes.length },
             contactSheet: { width: filmstrip.width, height: filmstrip.height, columns, rows, gap, scale: filmstripScale },
-            revision: inspection.revision ?? state.getRevision(),
+            revision: effectiveRevision,
           }, null, 2) },
         ] };
+      } catch (error) {
+        return bridgeToolError(error);
+      }
+    }
+  );
+
+  server.tool(
+    "analyze_animation_temporal",
+    "Performs deterministic automated temporal analysis of animation playback sequences (adjacent pixel diffs, center of mass shifts, area changes, palette spikes, single-pixel flicker, rigid regions, loop seam, contact points, durations, and cel jumps).",
+    {
+      ...animationSelectionSchema(),
+      rigidRegions: z.array(z.object({
+        id: z.string().min(1).max(64).describe("Unique rigid region identifier"),
+        x: z.number().int().finite().min(0).describe("X coordinate within canvas"),
+        y: z.number().int().finite().min(0).describe("Y coordinate within canvas"),
+        width: z.number().int().finite().positive().describe("Width of rigid region"),
+        height: z.number().int().finite().positive().describe("Height of rigid region"),
+      })).max(MAX_RIGID_REGIONS).optional().describe("Optional regions that must maintain pixel stability (max 16)"),
+      contactPoints: z.array(z.object({
+        id: z.string().min(1).max(64).describe("Unique contact point identifier"),
+        positions: z.array(z.object({
+          frameNumber: z.number().int().finite().positive().describe("Playback frame number"),
+          x: z.number().int().finite().min(0).describe("X coordinate within canvas"),
+          y: z.number().int().finite().min(0).describe("Y coordinate within canvas"),
+        })).min(2).max(64).describe("Frame-by-frame expected positions for displacement evaluation (min 2, max 64)"),
+        maxDisplacement: z.number().finite().min(0).optional().describe("Per-point displacement threshold in pixels"),
+      })).max(MAX_CONTACT_POINTS).optional().describe("Optional contact points evaluated for displacement (max 16)"),
+      maxContactPointDisplacement: z.number().finite().min(0).optional().default(0).describe("Maximum allowed Euclidean displacement between consecutive contact points (default: 0)"),
+      pixelDiffThreshold: z.number().int().finite().min(0).max(255).optional().default(0).describe("Per-channel delta treated as unchanged (default: 0)"),
+      maxAdjacentChangeRatio: z.number().finite().min(0).max(1).optional().default(0.85).describe("Threshold ratio for adjacent pixel difference spikes (default: 0.85)"),
+      maxCenterShift: z.number().finite().min(0).optional().describe("Visual center shift threshold in pixels (default: max(w,h) * 0.40)"),
+      maxAreaChangeRatio: z.number().finite().min(0).max(1).optional().default(0.60).describe("Relative threshold for sudden occupied area change (default: 0.60)"),
+      maxCelPositionJump: z.number().finite().min(0).optional().describe("Displacement threshold in pixels for layer cel jumps (default: max(w,h) * 0.50)"),
+      rigidTolerance: z.number().finite().min(0).max(1).optional().default(0.0).describe("Allowed ratio of mutated pixels in rigid regions (default: 0.0)"),
+      checkLoopContinuity: z.boolean().optional().describe("Override loop continuity evaluation between last and first frame"),
+    },
+    async (params: {
+      tagName?: string;
+      fromFrame?: number;
+      toFrame?: number;
+      direction?: AnimationDirection;
+      rigidRegions?: Array<{ id: string; x: number; y: number; width: number; height: number }>;
+      contactPoints?: Array<{
+        id: string;
+        positions: Array<{ frameNumber: number; x: number; y: number }>;
+        maxDisplacement?: number;
+      }>;
+      maxContactPointDisplacement?: number;
+      pixelDiffThreshold?: number;
+      maxAdjacentChangeRatio?: number;
+      maxCenterShift?: number;
+      maxAreaChangeRatio?: number;
+      maxCelPositionJump?: number;
+      rigidTolerance?: number;
+      checkLoopContinuity?: boolean;
+    }) => {
+      try {
+        const inspection = await fetchAnimationInspection(dispatcher, state);
+        const playback = resolveAnimationPlayback(inspection, params);
+        if (playback.frameNumbers.length > MAX_ANALYSIS_FRAMES) {
+          throw new Error(`Animation temporal analysis is limited to ${MAX_ANALYSIS_FRAMES} playback frames.`);
+        }
+        assertAnimationPixelBudget(inspection.width, inspection.height, playback.frameNumbers.length, 1);
+
+        const frames = await fetchPlaybackFrames(dispatcher, state, playback.frameNumbers);
+        const effectiveRevision = inspection.revision ?? state.getRevision();
+        if (typeof inspection.revision === "number" && state.getRevision() !== inspection.revision) {
+          throw new Error("The sprite changed while temporal analysis was being performed; analyze again for coherent results.");
+        }
+
+        const analysisResult = analyzeAnimationTemporalPure({
+          width: inspection.width,
+          height: inspection.height,
+          playback,
+          frameBuffers: frames,
+          inspectionLayers: inspection.layers,
+          rigidRegions: params.rigidRegions,
+          contactPoints: params.contactPoints,
+          thresholds: {
+            pixelDiffThreshold: params.pixelDiffThreshold,
+            maxAdjacentChangeRatio: params.maxAdjacentChangeRatio,
+            maxCenterShift: params.maxCenterShift,
+            maxAreaChangeRatio: params.maxAreaChangeRatio,
+            maxCelPositionJump: params.maxCelPositionJump,
+            rigidTolerance: params.rigidTolerance,
+            maxContactPointDisplacement: params.maxContactPointDisplacement,
+            checkLoopContinuity: params.checkLoopContinuity,
+          },
+        });
+
+        const analysisId = randomUUID();
+        let workflowCheck = {
+          hasActiveWorkflow: false,
+          matches: false,
+          workflowId: undefined as string | undefined,
+          workflowName: undefined as string | undefined,
+          reason: undefined as string | undefined,
+        };
+
+        if (workflowState) {
+          workflowState.registerTemporalAnalysis({
+            analysisId,
+            revision: effectiveRevision,
+            temporalHash: analysisResult.temporalHash,
+            targetSelection: {
+              tagName: playback.tagName ?? undefined,
+              frameRange: { from: playback.fromFrame, to: playback.toFrame },
+              frameNumbers: playback.frameNumbers,
+            },
+            playback: {
+              frameNumbers: playback.frameNumbers,
+              tagName: playback.tagName ?? undefined,
+              direction: playback.direction,
+              loop: playback.loopsContinuously,
+            },
+            summary: {
+              totalFrames: analysisResult.summary.totalFrames,
+              totalDurationMs: analysisResult.summary.totalDurationMs,
+              totalFindings: analysisResult.summary.totalFindings,
+              findingsCount: analysisResult.summary.findingsCount,
+              truncated: analysisResult.summary.truncated,
+              warningCount: analysisResult.summary.warningCount,
+              infoCount: analysisResult.summary.infoCount,
+            },
+            recordedAt: new Date().toISOString(),
+          });
+
+          const check = workflowState.checkActiveWorkflowMatch(
+            { frameNumbers: playback.frameNumbers, tagName: playback.tagName ?? undefined },
+            effectiveRevision
+          );
+          workflowCheck = {
+            hasActiveWorkflow: check.hasActiveWorkflow,
+            matches: check.matches,
+            workflowId: check.workflowId,
+            workflowName: check.workflowName,
+            reason: check.reason,
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: true,
+                analysisId,
+                temporalHash: analysisResult.temporalHash,
+                playback: {
+                  tagName: playback.tagName,
+                  fromFrame: playback.fromFrame,
+                  toFrame: playback.toFrame,
+                  direction: playback.direction,
+                  repeats: playback.repeats,
+                  loopsContinuously: playback.loopsContinuously,
+                  frameNumbers: playback.frameNumbers,
+                  totalDurationMs: playback.totalDurationMs,
+                  averageFps: playback.averageFps,
+                },
+                summary: analysisResult.summary,
+                findings: analysisResult.findings,
+                metrics: analysisResult.metrics,
+                workflow: {
+                  hasActiveWorkflow: workflowCheck.hasActiveWorkflow,
+                  matchesActiveWorkflow: workflowCheck.matches,
+                  workflowId: workflowCheck.workflowId,
+                  workflowName: workflowCheck.workflowName,
+                  reason: workflowCheck.reason,
+                },
+                revision: effectiveRevision,
+              }, null, 2),
+            },
+          ],
+        };
       } catch (error) {
         return bridgeToolError(error);
       }

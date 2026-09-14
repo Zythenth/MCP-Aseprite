@@ -2,7 +2,13 @@
 import { PNG } from "pngjs";
 import { randomUUID } from "node:crypto";
 import type { AsepriteStatusResult } from "../bridge/protocol.js";
-import { MAX_PIXELS_BATCH, MAX_TILESET_PIXELS } from "../config.js";
+import {
+  MAX_PIXELS_BATCH,
+  MAX_TILESET_PIXELS,
+  MAX_ANIMATION_BATCH_OPERATIONS,
+  MAX_ANIMATION_BATCH_FRAMES,
+  MAX_ANIMATION_BATCH_PAYLOAD_BYTES,
+} from "../config.js";
 
 export const MAX_CHANGE_JOURNAL_ENTRIES = 128;
 
@@ -29,6 +35,9 @@ export interface MockCel {
   pixels: Uint32Array; // width * height little-endian RGBA
   opacity?: number;
   imageId?: string;
+  zIndex?: number;
+  color?: string;
+  data?: string;
 }
 
 export interface MockLayer {
@@ -86,12 +95,28 @@ export interface PixelDelta {
   newColor: number;
 }
 
+export interface CelSnapshotEntry {
+  key: string;
+  cel: MockCel | null;
+}
+
+export interface FrameDurationSnapshot {
+  frameNumber: number;
+  duration: number;
+}
+
 export interface MockTransaction {
   id: string;
   name: string;
   revisionBefore: number;
   revisionAfter: number;
   pixelDeltas: PixelDelta[];
+  batchData?: {
+    celsBefore: CelSnapshotEntry[];
+    celsAfter: CelSnapshotEntry[];
+    frameDurationsBefore: FrameDurationSnapshot[];
+    frameDurationsAfter: FrameDurationSnapshot[];
+  };
 }
 
 export function packRgba(r: number, g: number, b: number, a: number): number {
@@ -208,7 +233,7 @@ export class MockAsepriteEngine {
   public redoStack: MockTransaction[] = [];
   public changeJournal: PixelJournalEntry[] = [];
   public palette: Uint32Array = new Uint32Array(256);
-  public tags: Array<{ name: string; from: number; to: number; color?: string; direction: "forward" | "reverse" | "pingpong" | "pingpong_reverse"; repeats: number }> = [];
+  public tags: Array<{ name: string; from: number; to: number; color?: string; direction: "forward" | "reverse" | "pingpong" | "pingpong_reverse"; repeats: number; data?: string }> = [];
   public slices: MockSlice[] = [];
   public selectionPixels = new Set<number>();
   public tilesets: MockTileset[] = [];
@@ -793,15 +818,480 @@ export class MockAsepriteEngine {
         });
       }
 
+      case "batch_animation_edits": {
+        if (!this.hasActiveSprite) throw new Error("No active sprite open in Aseprite.");
+        if (!params || typeof params !== "object") throw new Error("params must be an object.");
+
+        const payloadBytes = Buffer.byteLength(JSON.stringify(params), "utf8");
+        if (payloadBytes > MAX_ANIMATION_BATCH_PAYLOAD_BYTES) {
+          throw new Error("Payload exceeds maximum size of 4 MiB.");
+        }
+
+        const isDenseArray = (t: unknown): t is any[] => {
+          if (!Array.isArray(t)) return false;
+          const keys = Object.keys(t);
+          if (keys.length !== t.length) return false;
+          for (let i = 0; i < t.length; i++) {
+            if (t[i] === undefined) return false;
+          }
+          return true;
+        };
+
+        const operations = params.operations;
+        if (!isDenseArray(operations)) {
+          throw new Error("operations must be a dense array.");
+        }
+        if (operations.length < 1 || operations.length > MAX_ANIMATION_BATCH_OPERATIONS) {
+          throw new Error(`Operations count must be between 1 and ${MAX_ANIMATION_BATCH_OPERATIONS}.`);
+        }
+
+        const ALLOWED_OPS = new Set(["set_pixels", "erase_pixels", "set_cel_position", "set_cel_opacity", "set_frame_duration"]);
+
+        let totalPixelsAndPoints = 0;
+        const resolvedFramesSet = new Set<number>();
+        const resolvedFramesList: number[] = [];
+        const plans: any[] = [];
+        const layerOpFlags = new Map<number, Map<number, { hasPixel: boolean; hasPosition: boolean }>>();
+
+        for (let idx = 0; idx < operations.length; idx++) {
+          const op = operations[idx];
+          if (!op || typeof op !== "object") {
+            throw new Error(`Operation at index ${idx} must be an object.`);
+          }
+          const opName = op.op;
+          if (typeof opName !== "string" || !ALLOWED_OPS.has(opName)) {
+            throw new Error(`Disallowed or unsupported operation '${opName}' at index ${idx}.`);
+          }
+
+          if (opName === "set_pixels" || opName === "erase_pixels") {
+            const layer = this.resolveTargetLayer(op, true);
+            const frame = this.resolveTargetFrame(op.frameNumber);
+            const fn = frame.frameNumber;
+            if (!resolvedFramesSet.has(fn)) {
+              resolvedFramesSet.add(fn);
+              resolvedFramesList.push(fn);
+            }
+
+            let layerFlags = layerOpFlags.get(layer.index);
+            if (!layerFlags) {
+              layerFlags = new Map();
+              layerOpFlags.set(layer.index, layerFlags);
+            }
+            let flags = layerFlags.get(fn);
+            if (!flags) {
+              flags = { hasPixel: false, hasPosition: false };
+              layerFlags.set(fn, flags);
+            }
+            if (flags.hasPosition) {
+              throw new Error(`Cannot combine pixel edits and set_cel_position on the same cel at layer '${layer.name}', frame ${fn} (ambiguous semantics).`);
+            }
+            flags.hasPixel = true;
+
+            if (opName === "set_pixels") {
+              const pxList = op.pixels;
+              if (!isDenseArray(pxList) || pxList.length < 1 || pxList.length > MAX_PIXELS_BATCH) {
+                throw new Error(`set_pixels at index ${idx} requires dense pixels array between 1 and ${MAX_PIXELS_BATCH}.`);
+              }
+              totalPixelsAndPoints += pxList.length;
+              const validatedPixels: Array<{ x: number; y: number; color: number }> = [];
+              for (let pIdx = 0; pIdx < pxList.length; pIdx++) {
+                const p = pxList[pIdx];
+                if (!p || typeof p.x !== "number" || typeof p.y !== "number" || !Number.isInteger(p.x) || !Number.isInteger(p.y)) {
+                  throw new Error(`Invalid pixel coordinates at op ${idx}, pixel ${pIdx}.`);
+                }
+                if (p.x < 0 || p.x >= this.width || p.y < 0 || p.y >= this.height) {
+                  throw new Error(`Pixel coordinate (${p.x}, ${p.y}) out of canvas bounds at op ${idx}.`);
+                }
+                if (typeof p.color !== "string") {
+                  throw new Error(`Pixel color must be a hex string at op ${idx}, pixel ${pIdx}.`);
+                }
+                const nativeColor = hexToRgba(p.color);
+                validatedPixels.push({ x: p.x, y: p.y, color: nativeColor });
+              }
+              plans.push({ op: "set_pixels", layer, frame, pixels: validatedPixels });
+            } else {
+              const ptList = op.points;
+              if (!isDenseArray(ptList) || ptList.length < 1 || ptList.length > MAX_PIXELS_BATCH) {
+                throw new Error(`erase_pixels at index ${idx} requires dense points array between 1 and ${MAX_PIXELS_BATCH}.`);
+              }
+              totalPixelsAndPoints += ptList.length;
+              const validatedPoints: Array<{ x: number; y: number; color: number }> = [];
+              for (let ptIdx = 0; ptIdx < ptList.length; ptIdx++) {
+                const pt = ptList[ptIdx];
+                if (!pt || typeof pt.x !== "number" || typeof pt.y !== "number" || !Number.isInteger(pt.x) || !Number.isInteger(pt.y)) {
+                  throw new Error(`Invalid point coordinates at op ${idx}, point ${ptIdx}.`);
+                }
+                if (pt.x < 0 || pt.x >= this.width || pt.y < 0 || pt.y >= this.height) {
+                  throw new Error(`Point coordinate (${pt.x}, ${pt.y}) out of canvas bounds at op ${idx}.`);
+                }
+                validatedPoints.push({ x: pt.x, y: pt.y, color: 0 });
+              }
+              plans.push({ op: "erase_pixels", layer, frame, points: validatedPoints });
+            }
+          } else if (opName === "set_cel_position") {
+            const layer = this.resolveTargetLayer(op, true);
+            const frame = this.resolveTargetFrame(op.frameNumber);
+            const fn = frame.frameNumber;
+            if (!resolvedFramesSet.has(fn)) {
+              resolvedFramesSet.add(fn);
+              resolvedFramesList.push(fn);
+            }
+
+            let layerFlags = layerOpFlags.get(layer.index);
+            if (!layerFlags) {
+              layerFlags = new Map();
+              layerOpFlags.set(layer.index, layerFlags);
+            }
+            let flags = layerFlags.get(fn);
+            if (!flags) {
+              flags = { hasPixel: false, hasPosition: false };
+              layerFlags.set(fn, flags);
+            }
+            if (flags.hasPixel) {
+              throw new Error(`Cannot combine pixel edits and set_cel_position on the same cel at layer '${layer.name}', frame ${fn} (ambiguous semantics).`);
+            }
+            flags.hasPosition = true;
+
+            const celKey = `${layer.index}:${fn}`;
+            const cel = this.cels.get(celKey);
+            if (!cel) {
+              throw new Error("set_cel_position requires an existing cel at target layer and frame.");
+            }
+            if (typeof op.x !== "number" || typeof op.y !== "number" || !Number.isInteger(op.x) || !Number.isInteger(op.y)) {
+              throw new Error(`set_cel_position requires integer x and y at op ${idx}.`);
+            }
+            plans.push({ op: "set_cel_position", layer, frame, celKey, x: op.x, y: op.y });
+          } else if (opName === "set_cel_opacity") {
+            const layer = this.resolveTargetLayer(op, true);
+            const frame = this.resolveTargetFrame(op.frameNumber);
+            const fn = frame.frameNumber;
+            if (!resolvedFramesSet.has(fn)) {
+              resolvedFramesSet.add(fn);
+              resolvedFramesList.push(fn);
+            }
+
+            const celKey = `${layer.index}:${fn}`;
+            const cel = this.cels.get(celKey);
+            if (!cel) {
+              throw new Error("set_cel_opacity requires an existing cel at target layer and frame.");
+            }
+            if (typeof op.opacity !== "number" || !Number.isInteger(op.opacity) || op.opacity < 0 || op.opacity > 255) {
+              throw new Error(`set_cel_opacity requires integer opacity 0..255 at op ${idx}.`);
+            }
+            plans.push({ op: "set_cel_opacity", layer, frame, celKey, opacity: op.opacity });
+          } else if (opName === "set_frame_duration") {
+            if (typeof op.frameNumber !== "number" || !Number.isInteger(op.frameNumber) || op.frameNumber < 1 || op.frameNumber > this.frames.length) {
+              throw new Error(`Invalid frameNumber at op ${idx}.`);
+            }
+            if (typeof op.durationMs !== "number" || !Number.isInteger(op.durationMs) || op.durationMs < 1 || op.durationMs > 60000) {
+              throw new Error(`durationMs must be an integer between 1 and 60000 at op ${idx}.`);
+            }
+            const frame = this.frames.find((f) => f.frameNumber === op.frameNumber)!;
+            const fn = frame.frameNumber;
+            if (!resolvedFramesSet.has(fn)) {
+              resolvedFramesSet.add(fn);
+              resolvedFramesList.push(fn);
+            }
+            plans.push({ op: "set_frame_duration", frame, durationMs: op.durationMs });
+          }
+        }
+
+        if (totalPixelsAndPoints > MAX_PIXELS_BATCH) {
+          throw new Error(`Total pixels and points across batch operations exceeds ${MAX_PIXELS_BATCH} limit.`);
+        }
+        if (resolvedFramesList.length > MAX_ANIMATION_BATCH_FRAMES) {
+          throw new Error(`Total resolved frames exceeds limit of ${MAX_ANIMATION_BATCH_FRAMES} frames.`);
+        }
+
+        // Planning on clones (never recursive execution)
+        const celsBefore = new Map<string, MockCel | null>();
+        const workingCels = new Map<string, MockCel>();
+        const workingPositionWasSet = new Map<string, boolean>();
+        const originalPixelMaps = new Map<string, Map<number, number>>();
+        const finalPixelMaps = new Map<string, Map<number, number>>();
+        const celOrder: string[] = [];
+
+        const getWorkingCel = (layerIndex: number, frameNumber: number): { cel: MockCel; key: string } => {
+          const key = `${layerIndex}:${frameNumber}`;
+          if (!workingCels.has(key)) {
+            celOrder.push(key);
+            workingPositionWasSet.set(key, false);
+            const existing = this.cels.get(key);
+            if (existing) {
+              celsBefore.set(key, {
+                ...existing,
+                bounds: { ...existing.bounds },
+                pixels: new Uint32Array(existing.pixels),
+              });
+              const working: MockCel = {
+                ...existing,
+                layerIndex,
+                frameNumber,
+                bounds: { x: 0, y: 0, width: this.width, height: this.height },
+                pixels: new Uint32Array(this.width * this.height),
+                opacity: existing.opacity ?? 255,
+              };
+              for (let cy = 0; cy < existing.bounds.height; cy++) {
+                for (let cx = 0; cx < existing.bounds.width; cx++) {
+                  const gx = existing.bounds.x + cx;
+                  const gy = existing.bounds.y + cy;
+                  if (gx >= 0 && gx < this.width && gy >= 0 && gy < this.height) {
+                    working.pixels[gy * this.width + gx] = existing.pixels[cy * existing.bounds.width + cx];
+                  }
+                }
+              }
+              workingCels.set(key, working);
+            } else {
+              celsBefore.set(key, null);
+              workingCels.set(key, {
+                layerIndex,
+                frameNumber,
+                bounds: { x: 0, y: 0, width: this.width, height: this.height },
+                pixels: new Uint32Array(this.width * this.height),
+                opacity: 255,
+                imageId: randomUUID(),
+              });
+            }
+            originalPixelMaps.set(key, new Map());
+            finalPixelMaps.set(key, new Map());
+          }
+          return { cel: workingCels.get(key)!, key };
+        };
+
+        const frameDurationsBefore = new Map<number, number>();
+        const workingDurations = new Map<number, number>();
+        const durationOrder: number[] = [];
+
+        // Apply operations onto clones
+        for (const plan of plans) {
+          if (plan.op === "set_pixels" || plan.op === "erase_pixels") {
+            const { cel, key } = getWorkingCel(plan.layer.index, plan.frame.frameNumber);
+            const origMap = originalPixelMaps.get(key)!;
+            const finalMap = finalPixelMaps.get(key)!;
+            const items = plan.op === "set_pixels" ? plan.pixels : plan.points;
+            for (const item of items) {
+              const pIdx = item.y * this.width + item.x;
+              if (!origMap.has(pIdx)) {
+                origMap.set(pIdx, cel.pixels[pIdx]);
+              }
+              cel.pixels[pIdx] = item.color;
+              finalMap.set(pIdx, item.color);
+            }
+          } else if (plan.op === "set_cel_position") {
+            const { cel, key } = getWorkingCel(plan.layer.index, plan.frame.frameNumber);
+            cel.bounds.x = plan.x;
+            cel.bounds.y = plan.y;
+            workingPositionWasSet.set(key, true);
+          } else if (plan.op === "set_cel_opacity") {
+            const { cel } = getWorkingCel(plan.layer.index, plan.frame.frameNumber);
+            cel.opacity = plan.opacity;
+          } else if (plan.op === "set_frame_duration") {
+            const fn = plan.frame.frameNumber;
+            if (!frameDurationsBefore.has(fn)) {
+              frameDurationsBefore.set(fn, plan.frame.duration);
+              durationOrder.push(fn);
+            }
+            workingDurations.set(fn, plan.durationMs / 1000);
+          }
+        }
+
+        // Evaluate diff against initial state
+        let minX = this.width, minY = this.height, maxX = -1, maxY = -1;
+        const updateBounds = (x: number, y: number, w?: number, h?: number) => {
+          if (w !== undefined && h !== undefined) {
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x + w - 1 > maxX) maxX = x + w - 1;
+            if (y + h - 1 > maxY) maxY = y + h - 1;
+          } else {
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        };
+
+        let totalPixelsChanged = 0;
+        const framesTouchedSet = new Set<number>();
+        let hasRealChange = false;
+        const changedCels = new Map<string, MockCel>();
+
+        for (const key of celOrder) {
+          const working = workingCels.get(key)!;
+          const before = celsBefore.get(key);
+          const origMap = originalPixelMaps.get(key)!;
+          const finalMap = finalPixelMaps.get(key)!;
+          const positionWasSet = workingPositionWasSet.get(key) === true;
+
+          let celPixelsChanged = 0;
+          for (const [pIdx, origColor] of origMap.entries()) {
+            const finalColor = finalMap.get(pIdx)!;
+            if (finalColor !== origColor) {
+              celPixelsChanged++;
+              const px = pIdx % this.width;
+              const py = Math.floor(pIdx / this.width);
+              updateBounds(px, py);
+            }
+          }
+
+          let celPositionChanged = false;
+          let celOpacityChanged = false;
+
+          if (before) {
+            if (positionWasSet && (working.bounds.x !== before.bounds.x || working.bounds.y !== before.bounds.y)) {
+              celPositionChanged = true;
+              updateBounds(before.bounds.x, before.bounds.y, before.bounds.width, before.bounds.height);
+              updateBounds(working.bounds.x, working.bounds.y, before.bounds.width, before.bounds.height);
+            }
+            if ((working.opacity ?? 255) !== (before.opacity ?? 255)) {
+              celOpacityChanged = true;
+              updateBounds(before.bounds.x, before.bounds.y, before.bounds.width, before.bounds.height);
+            }
+          }
+
+          if (celPixelsChanged > 0 || celPositionChanged || celOpacityChanged) {
+            hasRealChange = true;
+            totalPixelsChanged += celPixelsChanged;
+            framesTouchedSet.add(working.frameNumber);
+
+            if (celPixelsChanged > 0) {
+              changedCels.set(key, {
+                ...working,
+                bounds: { x: working.bounds.x, y: working.bounds.y, width: this.width, height: this.height },
+                pixels: new Uint32Array(working.pixels),
+              });
+            } else if (before) {
+              const targetX = positionWasSet ? working.bounds.x : before.bounds.x;
+              const targetY = positionWasSet ? working.bounds.y : before.bounds.y;
+              changedCels.set(key, {
+                ...before,
+                bounds: { ...before.bounds, x: targetX, y: targetY },
+                opacity: working.opacity,
+                pixels: new Uint32Array(before.pixels),
+              });
+            }
+          }
+        }
+
+        const changedDurations = new Map<number, number>();
+        for (const fn of durationOrder) {
+          const beforeSec = frameDurationsBefore.get(fn)!;
+          const finalSec = workingDurations.get(fn)!;
+          if (Math.abs(beforeSec - finalSec) > 0.0001) {
+            hasRealChange = true;
+            framesTouchedSet.add(fn);
+            changedDurations.set(fn, finalSec);
+          }
+        }
+
+        const finalBounds: MockCelBounds = minX <= maxX && minY <= maxY
+          ? { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 }
+          : { x: 0, y: 0, width: 0, height: 0 };
+
+        if (!hasRealChange) {
+          const noChangeRes: any = {
+            success: true,
+            changed: false,
+            operationsApplied: 0,
+            framesTouched: 0,
+            pixelsChanged: 0,
+            bounds: { x: 0, y: 0, width: 0, height: 0 },
+            revision: this.revision,
+          };
+          if (params.returnPreview) {
+            noChangeRes.pngBase64 = this.exportFramePngBase64(this.activeFrameNumber);
+          }
+          return noChangeRes;
+        }
+
+        // Apply mutations deterministically
+        for (const [key, changedCel] of changedCels.entries()) {
+          this.cels.set(key, changedCel);
+        }
+        for (const [fn, finalSec] of changedDurations.entries()) {
+          const f = this.frames.find((fr) => fr.frameNumber === fn);
+          if (f) f.duration = finalSec;
+        }
+
+        // Record single undo item
+        const tx: MockTransaction = {
+          id: `tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          name: "batch_animation_edits",
+          revisionBefore: this.revision,
+          revisionAfter: this.revision + 1,
+          pixelDeltas: [],
+          batchData: {
+            celsBefore: Array.from(celsBefore.entries()).map(([key, cel]) => ({
+              key,
+              cel: cel ? { ...cel, bounds: { ...cel.bounds }, pixels: new Uint32Array(cel.pixels) } : null,
+            })),
+            celsAfter: Array.from(celsBefore.keys()).map((key) => {
+              const after = this.cels.get(key);
+              return {
+                key,
+                cel: after ? { ...after, bounds: { ...after.bounds }, pixels: new Uint32Array(after.pixels) } : null,
+              };
+            }),
+            frameDurationsBefore: Array.from(frameDurationsBefore.entries()).map(([frameNumber, duration]) => ({ frameNumber, duration })),
+            frameDurationsAfter: Array.from(frameDurationsBefore.keys()).map((frameNumber) => {
+              const fr = this.frames.find((f) => f.frameNumber === frameNumber);
+              return { frameNumber, duration: fr?.duration ?? 0.1 };
+            }),
+          },
+        };
+        this.undoStack.push(tx);
+        this.redoStack = [];
+
+        const primaryFrameNumber = resolvedFramesList[0] ?? this.activeFrameNumber;
+        const result = this.finishMutation(
+          params,
+          {
+            changed: true,
+            operationsApplied: operations.length,
+            framesTouched: framesTouchedSet.size,
+            pixelsChanged: totalPixelsChanged,
+          },
+          finalBounds,
+          "animation",
+          primaryFrameNumber
+        );
+
+        // Adjust changeJournal entry for this revision to reflect totalPixelsChanged
+        const journalEntry = this.changeJournal.find((e) => e.revision === this.revision);
+        if (journalEntry) {
+          journalEntry.pixelsChanged = totalPixelsChanged;
+        }
+
+        return result;
+      }
+
       case "undo": {
         if (!this.hasActiveSprite) throw new Error("No active sprite.");
         if (this.undoStack.length === 0) throw new Error("No undo transactions available.");
 
         const tx = this.undoStack.pop()!;
-        for (let i = tx.pixelDeltas.length - 1; i >= 0; i--) {
-          const delta = tx.pixelDeltas[i];
-          const cel = this.getOrCreateCel(delta.layerIndex, delta.frameNumber);
-          this.setCelPixel(cel, delta.x, delta.y, delta.prevColor);
+        if (tx.batchData) {
+          for (const item of tx.batchData.celsBefore) {
+            if (item.cel === null) {
+              this.cels.delete(item.key);
+            } else {
+              this.cels.set(item.key, {
+                ...item.cel,
+                bounds: { ...item.cel.bounds },
+                pixels: new Uint32Array(item.cel.pixels),
+              });
+            }
+          }
+          for (const fd of tx.batchData.frameDurationsBefore) {
+            const f = this.frames.find((fr) => fr.frameNumber === fd.frameNumber);
+            if (f) f.duration = fd.duration;
+          }
+        } else {
+          for (let i = tx.pixelDeltas.length - 1; i >= 0; i--) {
+            const delta = tx.pixelDeltas[i];
+            const cel = this.getOrCreateCel(delta.layerIndex, delta.frameNumber);
+            this.setCelPixel(cel, delta.x, delta.y, delta.prevColor);
+          }
         }
         this.redoStack.push(tx);
         return this.finishMutation(params, {
@@ -814,10 +1304,28 @@ export class MockAsepriteEngine {
         if (this.redoStack.length === 0) throw new Error("No redo transactions available.");
 
         const tx = this.redoStack.pop()!;
-        for (let i = 0; i < tx.pixelDeltas.length; i++) {
-          const delta = tx.pixelDeltas[i];
-          const cel = this.getOrCreateCel(delta.layerIndex, delta.frameNumber);
-          this.setCelPixel(cel, delta.x, delta.y, delta.newColor);
+        if (tx.batchData) {
+          for (const item of tx.batchData.celsAfter) {
+            if (item.cel === null) {
+              this.cels.delete(item.key);
+            } else {
+              this.cels.set(item.key, {
+                ...item.cel,
+                bounds: { ...item.cel.bounds },
+                pixels: new Uint32Array(item.cel.pixels),
+              });
+            }
+          }
+          for (const fd of tx.batchData.frameDurationsAfter) {
+            const f = this.frames.find((fr) => fr.frameNumber === fd.frameNumber);
+            if (f) f.duration = fd.duration;
+          }
+        } else {
+          for (let i = 0; i < tx.pixelDeltas.length; i++) {
+            const delta = tx.pixelDeltas[i];
+            const cel = this.getOrCreateCel(delta.layerIndex, delta.frameNumber);
+            this.setCelPixel(cel, delta.x, delta.y, delta.newColor);
+          }
         }
         this.undoStack.push(tx);
         return this.finishMutation(params, {
@@ -1436,6 +1944,80 @@ export class MockAsepriteEngine {
         }, cel.bounds, "cel", frame.frameNumber);
       }
 
+      case "copy_cel": {
+        const sourceLayer = this.resolveAnyLayer(params, "sourceLayerName", "sourceLayerIndex");
+        const targetLayer = this.resolveAnyLayer(params, "targetLayerName", "targetLayerIndex");
+        if (sourceLayer.isGroup || targetLayer.isGroup) throw new Error("Source and target must be image layers.");
+        const sourceFrame = this.resolveTargetFrame(params.sourceFrame);
+        const targetFrame = this.resolveTargetFrame(params.targetFrame);
+        if (sourceLayer.index === targetLayer.index && sourceFrame.frameNumber === targetFrame.frameNumber) {
+          throw new Error("Source and target cel must be different.");
+        }
+        const source = this.cels.get(`${sourceLayer.index}:${sourceFrame.frameNumber}`);
+        if (!source) throw new Error("Source cel not found.");
+        const targetKey = `${targetLayer.index}:${targetFrame.frameNumber}`;
+        if (this.cels.has(targetKey) && params.replaceExisting !== true) {
+          throw new Error("Target cel already exists; set replaceExisting: true to replace it.");
+        }
+        const copied: MockCel = {
+          layerIndex: targetLayer.index,
+          frameNumber: targetFrame.frameNumber,
+          bounds: { ...source.bounds },
+          pixels: new Uint32Array(source.pixels),
+          opacity: source.opacity ?? 255,
+          imageId: randomUUID(),
+          zIndex: source.zIndex,
+          color: source.color,
+          data: source.data,
+        };
+        this.cels.set(targetKey, copied);
+        return this.finishMutation(params, {
+          sourceLayer: sourceLayer.name,
+          sourceFrame: sourceFrame.frameNumber,
+          targetLayer: targetLayer.name,
+          targetFrame: targetFrame.frameNumber,
+          copied: true,
+        }, copied.bounds, "cel", targetFrame.frameNumber);
+      }
+
+      case "move_cel": {
+        const sourceLayer = this.resolveAnyLayer(params, "sourceLayerName", "sourceLayerIndex");
+        const targetLayer = this.resolveAnyLayer(params, "targetLayerName", "targetLayerIndex");
+        if (sourceLayer.isGroup || targetLayer.isGroup) throw new Error("Source and target must be image layers.");
+        if (sourceLayer.index !== targetLayer.index) {
+          throw new Error("Cross-layer move is not supported.");
+        }
+        const sourceFrame = this.resolveTargetFrame(params.sourceFrame);
+        const targetFrame = this.resolveTargetFrame(params.targetFrame);
+        if (sourceLayer.index === targetLayer.index && sourceFrame.frameNumber === targetFrame.frameNumber) {
+          throw new Error("Source and target cel must be different.");
+        }
+        const sourceKey = `${sourceLayer.index}:${sourceFrame.frameNumber}`;
+        const source = this.cels.get(sourceKey);
+        if (!source) throw new Error("Source cel not found.");
+        const targetKey = `${targetLayer.index}:${targetFrame.frameNumber}`;
+        if (this.cels.has(targetKey) && params.replaceExisting !== true) {
+          throw new Error("Target cel already exists; set replaceExisting: true to replace it.");
+        }
+
+        if (this.cels.has(targetKey)) {
+          this.cels.delete(targetKey);
+        }
+        this.cels.delete(sourceKey);
+
+        source.layerIndex = targetLayer.index;
+        source.frameNumber = targetFrame.frameNumber;
+        this.cels.set(targetKey, source);
+
+        return this.finishMutation(params, {
+          sourceLayer: sourceLayer.name,
+          sourceFrame: sourceFrame.frameNumber,
+          targetLayer: targetLayer.name,
+          targetFrame: targetFrame.frameNumber,
+          moved: true,
+        }, source.bounds, "cel", targetFrame.frameNumber);
+      }
+
       case "list_layer_tree": {
         const visit = (parentIndex: number | null): any[] => this.layers
           .filter((layer) => layer.parentIndex === parentIndex)
@@ -1864,10 +2446,17 @@ export class MockAsepriteEngine {
           celCount: [...this.cels.values()].filter((cel) => cel.frameNumber === frame.frameNumber).length,
         }));
         const layers = this.layers.map((layer) => {
-          const celFrames = [...this.cels.values()]
+          const layerCels = [...this.cels.values()]
             .filter((cel) => cel.layerIndex === layer.index)
-            .map((cel) => cel.frameNumber)
-            .sort((left, right) => left - right);
+            .sort((left, right) => left.frameNumber - right.frameNumber);
+          const celFrames = layerCels.map((cel) => cel.frameNumber);
+          const cels = layer.isGroup ? undefined : layerCels.map((cel) => ({
+            frameNumber: cel.frameNumber,
+            x: cel.bounds.x,
+            y: cel.bounds.y,
+            bounds: { ...cel.bounds },
+            position: { x: cel.bounds.x, y: cel.bounds.y },
+          }));
           return {
             uuid: `mock-layer-${layer.index}`,
             name: layer.name,
@@ -1879,6 +2468,7 @@ export class MockAsepriteEngine {
             isTilemap: layer.isTilemap ?? false,
             celCount: celFrames.length,
             celFrames,
+            cels,
           };
         });
         return {
@@ -1986,6 +2576,131 @@ export class MockAsepriteEngine {
         return this.finishMutation(params, { frameNumber: f.frameNumber, durationMs: params.durationMs }, { x: 0, y: 0, width: this.width, height: this.height }, "frames", f.frameNumber);
       }
 
+      case "move_frame": {
+        const fromFrame = params.fromFrame;
+        const toFrame = params.toFrame;
+        if (typeof fromFrame !== "number" || !Number.isInteger(fromFrame) || fromFrame < 1 || fromFrame > this.frames.length) {
+          throw new Error(`Invalid fromFrame: ${fromFrame}`);
+        }
+        if (typeof toFrame !== "number" || !Number.isInteger(toFrame) || toFrame < 1 || toFrame > this.frames.length) {
+          throw new Error(`Invalid toFrame: ${toFrame}`);
+        }
+
+        if (fromFrame === toFrame) {
+          return { success: true, fromFrame, toFrame, moved: false, revision: this.revision };
+        }
+
+        const srcFrameIdx = fromFrame - 1;
+        const [movedFrame] = this.frames.splice(srcFrameIdx, 1);
+        this.frames.splice(toFrame - 1, 0, movedFrame);
+        for (let i = 0; i < this.frames.length; i++) {
+          this.frames[i].frameNumber = i + 1;
+        }
+
+        const remap = (f: number): number => {
+          if (fromFrame < toFrame) {
+            if (f === fromFrame) return toFrame;
+            if (f > fromFrame && f <= toFrame) return f - 1;
+            return f;
+          } else {
+            if (f === fromFrame) return toFrame;
+            if (f >= toFrame && f < fromFrame) return f + 1;
+            return f;
+          }
+        };
+
+        const newCels = new Map<string, MockCel>();
+        for (const [key, cel] of this.cels.entries()) {
+          const [lStr, fStr] = key.split(":");
+          const l = Number(lStr);
+          const oldF = Number(fStr);
+          const newF = remap(oldF);
+          cel.frameNumber = newF;
+          newCels.set(`${l}:${newF}`, cel);
+        }
+        this.cels = newCels;
+
+        this.activeFrameNumber = toFrame;
+
+        return this.finishMutation(params, {
+          fromFrame,
+          toFrame,
+          moved: true,
+          totalFrames: this.frames.length,
+        }, { x: 0, y: 0, width: this.width, height: this.height }, "frames", toFrame, true);
+      }
+
+      case "set_frame_durations": {
+        const hasDurations = params.durations !== undefined;
+        const hasRangePart = params.fromFrame !== undefined || params.toFrame !== undefined || params.durationMs !== undefined;
+
+        if (hasDurations && hasRangePart) {
+          throw new Error("Cannot mix 'durations' and range parameters ('fromFrame', 'toFrame', 'durationMs').");
+        }
+        if (!hasDurations && !hasRangePart) {
+          throw new Error("Must provide either 'durations' or range parameters ('fromFrame', 'toFrame', 'durationMs').");
+        }
+
+        let normalizedDurations: Array<{ frameNumber: number; durationMs: number }>;
+
+        if (hasRangePart) {
+          const { fromFrame, toFrame, durationMs } = params;
+          if (fromFrame === undefined || toFrame === undefined || durationMs === undefined) {
+            throw new Error("Range mode requires all of 'fromFrame', 'toFrame', and 'durationMs'.");
+          }
+          if (typeof fromFrame !== "number" || !Number.isInteger(fromFrame) || fromFrame < 1 || fromFrame > this.frames.length) {
+            throw new Error(`Invalid fromFrame: ${fromFrame}`);
+          }
+          if (typeof toFrame !== "number" || !Number.isInteger(toFrame) || toFrame < 1 || toFrame > this.frames.length) {
+            throw new Error(`Invalid toFrame: ${toFrame}`);
+          }
+          if (fromFrame > toFrame) {
+            throw new Error("fromFrame must be <= toFrame");
+          }
+          if ((toFrame - fromFrame + 1) > 256) {
+            throw new Error("Range exceeds maximum of 256 frames.");
+          }
+          if (typeof durationMs !== "number" || !Number.isInteger(durationMs) || durationMs < 1 || durationMs > 60000) {
+            throw new Error("durationMs must be an integer between 1 and 60000.");
+          }
+          normalizedDurations = [];
+          for (let fn = fromFrame; fn <= toFrame; fn++) {
+            normalizedDurations.push({ frameNumber: fn, durationMs });
+          }
+        } else {
+          if (!Array.isArray(params.durations) || params.durations.length < 1 || params.durations.length > 256) {
+            throw new Error("durations must be an array between 1 and 256 entries.");
+          }
+          normalizedDurations = params.durations;
+        }
+
+        const seenFrames = new Set<number>();
+        for (const item of normalizedDurations) {
+          const fn = item.frameNumber;
+          const dur = item.durationMs;
+          if (typeof fn !== "number" || !Number.isInteger(fn) || fn < 1 || fn > this.frames.length) {
+            throw new Error(`Invalid frameNumber: ${fn}`);
+          }
+          if (seenFrames.has(fn)) {
+            throw new Error(`Duplicate frameNumber: ${fn}`);
+          }
+          seenFrames.add(fn);
+          if (typeof dur !== "number" || !Number.isInteger(dur) || dur < 1 || dur > 60000) {
+            throw new Error("durationMs must be an integer between 1 and 60000.");
+          }
+        }
+
+        for (const item of normalizedDurations) {
+          const f = this.frames.find((fr) => fr.frameNumber === item.frameNumber);
+          if (f) f.duration = item.durationMs / 1000;
+        }
+
+        return this.finishMutation(params, {
+          updatedFrames: normalizedDurations.length,
+          durations: normalizedDurations,
+        }, { x: 0, y: 0, width: this.width, height: this.height }, "frames");
+      }
+
       case "create_tag": {
         const from = params.fromFrame;
         const to = params.toFrame;
@@ -2026,6 +2741,94 @@ export class MockAsepriteEngine {
             toFrame: t.to,
           })),
         };
+
+      case "update_tag": {
+        const tag = this.tags.find((t) => t.name === params.name);
+        if (!tag) throw new Error(`Tag not found: ${params.name}`);
+        if (params.newName && params.newName !== tag.name && this.tags.some((t) => t !== tag && t.name === params.newName)) {
+          throw new Error(`Tag already exists: ${params.newName}`);
+        }
+        const from = params.fromFrame ?? tag.from;
+        const to = params.toFrame ?? tag.to;
+        if (typeof from !== "number" || !Number.isInteger(from) || from < 1 || from > this.frames.length) {
+          throw new Error(`Frame ${from} out of range`);
+        }
+        if (typeof to !== "number" || !Number.isInteger(to) || to < 1 || to > this.frames.length) {
+          throw new Error(`Frame ${to} out of range`);
+        }
+        if (from > to) throw new Error("fromFrame must be <= toFrame");
+        if (params.direction && !["forward", "reverse", "pingpong", "pingpong_reverse"].includes(params.direction)) {
+          throw new Error(`Invalid tag direction: ${params.direction}`);
+        }
+        if (params.repeats !== undefined && (!Number.isInteger(params.repeats) || params.repeats < 0 || params.repeats > 65535)) {
+          throw new Error("repeats must be an integer between 0 and 65535.");
+        }
+
+        const finalName = params.newName ?? tag.name;
+        const finalFrom = from;
+        const finalTo = to;
+        const finalDirection = params.direction ?? tag.direction;
+        const finalRepeats = params.repeats !== undefined ? params.repeats : (tag.repeats ?? 0);
+
+        let colorChanged = false;
+        let finalColor = tag.color;
+        if (params.color !== undefined) {
+          const normalizedNewColor = rgbaToHex(hexToRgba(params.color));
+          const currentColor = tag.color ? rgbaToHex(hexToRgba(tag.color)) : undefined;
+          if (normalizedNewColor !== currentColor) {
+            colorChanged = true;
+          }
+          finalColor = normalizedNewColor;
+        }
+
+        const nameChanged = finalName !== tag.name;
+        const rangeChanged = finalFrom !== tag.from || finalTo !== tag.to;
+        const directionChanged = finalDirection !== tag.direction;
+        const repeatsChanged = finalRepeats !== (tag.repeats ?? 0);
+
+        if (!nameChanged && !rangeChanged && !directionChanged && !repeatsChanged && !colorChanged) {
+          return {
+            success: true,
+            changed: false,
+            tag: tag.name,
+            fromFrame: tag.from,
+            toFrame: tag.to,
+            repeats: tag.repeats ?? 0,
+            revision: this.revision,
+          };
+        }
+
+        tag.name = finalName;
+        tag.from = finalFrom;
+        tag.to = finalTo;
+        tag.direction = finalDirection;
+        tag.repeats = finalRepeats;
+        if (params.color !== undefined) {
+          tag.color = finalColor;
+        }
+
+        return this.finishMutation(params, {
+          changed: true,
+          tag: tag.name,
+          fromFrame: tag.from,
+          toFrame: tag.to,
+          repeats: tag.repeats ?? 0,
+        }, { x: 0, y: 0, width: this.width, height: this.height }, "tags");
+      }
+
+      case "delete_tag": {
+        if (params.confirm !== true) throw new Error("delete_tag requires confirm: true");
+        const idx = this.tags.findIndex((t) => t.name === params.name);
+        if (idx === -1) throw new Error(`Tag not found: ${params.name}`);
+        const [removed] = this.tags.splice(idx, 1);
+        const metadata = {
+          name: removed.name,
+          fromFrame: removed.from,
+          toFrame: removed.to,
+          repeats: removed.repeats ?? 0,
+        };
+        return this.finishMutation(params, { tag: removed.name, deleted: true, metadata }, { x: 0, y: 0, width: this.width, height: this.height }, "tags");
+      }
 
       case "render_animation_gif": {
         const frameNumbers = params.frameNumbers;

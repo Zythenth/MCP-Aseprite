@@ -1298,6 +1298,465 @@ handlers.erase_pixels = function(params)
   return handlers.set_pixels(params)
 end
 
+handlers.batch_animation_edits = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite open in Aseprite.") end
+  if type(params) ~= "table" then error("params must be a table.") end
+
+  local encodedPayload = bridgeJson.encode(params)
+  if #encodedPayload > 4 * 1024 * 1024 then
+    error("Batch payload size exceeds 4 MiB limit.")
+  end
+
+  local function isDenseArray(t)
+    if type(t) ~= "table" then return false end
+    local n = #t
+    local count = 0
+    for k, _ in pairs(t) do
+      if type(k) ~= "number" or math.floor(k) ~= k or k < 1 or k > n then
+        return false
+      end
+      count = count + 1
+    end
+    return count == n
+  end
+
+  local operations = params.operations
+  if not isDenseArray(operations) then
+    error("operations must be a dense array table.")
+  end
+  local opCount = #operations
+  if opCount < 1 or opCount > 64 then
+    error("operations array must contain between 1 and 64 items.")
+  end
+
+  local ALLOWED_OPS = {
+    set_pixels = true,
+    erase_pixels = true,
+    set_cel_position = true,
+    set_cel_opacity = true,
+    set_frame_duration = true
+  }
+
+  local totalPixelsAndPoints = 0
+  local resolvedFramesSet = {}
+  local resolvedFramesList = {}
+  local plans = {}
+  local layerOpFlags = {} -- layer -> frameNumber -> { hasPixel = bool, hasPosition = bool }
+
+  -- Phase 1: Authoritative Pre-validation and Plan Construction
+  for idx = 1, opCount do
+    local op = operations[idx]
+    if type(op) ~= "table" then
+      error("Operation at index " .. idx .. " must be a table.")
+    end
+    local opName = op.op
+    if type(opName) ~= "string" or not ALLOWED_OPS[opName] then
+      error("Disallowed or unsupported operation '" .. tostring(opName) .. "' at index " .. idx .. ".")
+    end
+
+    if opName == "set_pixels" or opName == "erase_pixels" then
+      local layer = resolveTargetLayer(spr, op, true)
+      local frame = resolveTargetFrame(spr, op.frameNumber)
+      local fn = frame.frameNumber
+      if not resolvedFramesSet[fn] then
+        resolvedFramesSet[fn] = true
+        table.insert(resolvedFramesList, fn)
+      end
+
+      layerOpFlags[layer] = layerOpFlags[layer] or {}
+      layerOpFlags[layer][fn] = layerOpFlags[layer][fn] or { hasPixel = false, hasPosition = false }
+      if layerOpFlags[layer][fn].hasPosition then
+        error("Cannot combine pixel edits and set_cel_position on the same cel at layer '" .. layer.name .. "', frame " .. fn .. " (ambiguous semantics).")
+      end
+      layerOpFlags[layer][fn].hasPixel = true
+
+      if opName == "set_pixels" then
+        local pxList = op.pixels
+        if not isDenseArray(pxList) or #pxList < 1 or #pxList > MAX_PIXELS_BATCH then
+          error("set_pixels at index " .. idx .. " requires dense pixels array between 1 and " .. tostring(MAX_PIXELS_BATCH) .. ".")
+        end
+        totalPixelsAndPoints = totalPixelsAndPoints + #pxList
+        local validatedPixels = {}
+        for pIdx = 1, #pxList do
+          local p = pxList[pIdx]
+          if type(p) ~= "table" or type(p.x) ~= "number" or type(p.y) ~= "number"
+             or math.floor(p.x) ~= p.x or math.floor(p.y) ~= p.y then
+            error("Invalid pixel coordinates at op " .. idx .. ", pixel " .. pIdx .. ".")
+          end
+          if p.x < 0 or p.x >= spr.width or p.y < 0 or p.y >= spr.height then
+            error("Pixel coordinate (" .. p.x .. ", " .. p.y .. ") out of canvas bounds at op " .. idx .. ".")
+          end
+          if type(p.color) ~= "string" then
+            error("Pixel color must be a hex string at op " .. idx .. ", pixel " .. pIdx .. ".")
+          end
+          local nativeColor = encodeColorToPixel(spr, p.color)
+          table.insert(validatedPixels, { x = p.x, y = p.y, color = nativeColor })
+        end
+        table.insert(plans, {
+          op = "set_pixels",
+          layer = layer,
+          frame = frame,
+          pixels = validatedPixels
+        })
+      else
+        local ptList = op.points
+        if not isDenseArray(ptList) or #ptList < 1 or #ptList > MAX_PIXELS_BATCH then
+          error("erase_pixels at index " .. idx .. " requires dense points array between 1 and " .. tostring(MAX_PIXELS_BATCH) .. ".")
+        end
+        totalPixelsAndPoints = totalPixelsAndPoints + #ptList
+        local transPixel = getTransparentPixel(spr)
+        local validatedPoints = {}
+        for ptIdx = 1, #ptList do
+          local pt = ptList[ptIdx]
+          if type(pt) ~= "table" or type(pt.x) ~= "number" or type(pt.y) ~= "number"
+             or math.floor(pt.x) ~= pt.x or math.floor(pt.y) ~= pt.y then
+            error("Invalid point coordinates at op " .. idx .. ", point " .. ptIdx .. ".")
+          end
+          if pt.x < 0 or pt.x >= spr.width or pt.y < 0 or pt.y >= spr.height then
+            error("Point coordinate (" .. pt.x .. ", " .. pt.y .. ") out of canvas bounds at op " .. idx .. ".")
+          end
+          table.insert(validatedPoints, { x = pt.x, y = pt.y, color = transPixel })
+        end
+        table.insert(plans, {
+          op = "erase_pixels",
+          layer = layer,
+          frame = frame,
+          points = validatedPoints
+        })
+      end
+
+    elseif opName == "set_cel_position" then
+      local layer = resolveTargetLayer(spr, op, true)
+      local frame = resolveTargetFrame(spr, op.frameNumber)
+      local fn = frame.frameNumber
+      if not resolvedFramesSet[fn] then
+        resolvedFramesSet[fn] = true
+        table.insert(resolvedFramesList, fn)
+      end
+
+      layerOpFlags[layer] = layerOpFlags[layer] or {}
+      layerOpFlags[layer][fn] = layerOpFlags[layer][fn] or { hasPixel = false, hasPosition = false }
+      if layerOpFlags[layer][fn].hasPixel then
+        error("Cannot combine pixel edits and set_cel_position on the same cel at layer '" .. layer.name .. "', frame " .. fn .. " (ambiguous semantics).")
+      end
+      layerOpFlags[layer][fn].hasPosition = true
+
+      local cel = layer:cel(frame)
+      if not cel then
+        error("set_cel_position requires an existing cel at target layer and frame.")
+      end
+      if type(op.x) ~= "number" or type(op.y) ~= "number"
+         or math.floor(op.x) ~= op.x or math.floor(op.y) ~= op.y then
+        error("set_cel_position requires integer x and y at op " .. idx .. ".")
+      end
+      table.insert(plans, {
+        op = "set_cel_position",
+        layer = layer,
+        frame = frame,
+        cel = cel,
+        x = op.x,
+        y = op.y
+      })
+
+    elseif opName == "set_cel_opacity" then
+      local layer = resolveTargetLayer(spr, op, true)
+      local frame = resolveTargetFrame(spr, op.frameNumber)
+      local fn = frame.frameNumber
+      if not resolvedFramesSet[fn] then
+        resolvedFramesSet[fn] = true
+        table.insert(resolvedFramesList, fn)
+      end
+
+      local cel = layer:cel(frame)
+      if not cel then
+        error("set_cel_opacity requires an existing cel at target layer and frame.")
+      end
+      if type(op.opacity) ~= "number" or math.floor(op.opacity) ~= op.opacity
+         or op.opacity < 0 or op.opacity > 255 then
+        error("set_cel_opacity requires integer opacity 0..255 at op " .. idx .. ".")
+      end
+      table.insert(plans, {
+        op = "set_cel_opacity",
+        layer = layer,
+        frame = frame,
+        cel = cel,
+        opacity = op.opacity
+      })
+
+    elseif opName == "set_frame_duration" then
+      if type(op.frameNumber) ~= "number" or math.floor(op.frameNumber) ~= op.frameNumber
+         or op.frameNumber < 1 or op.frameNumber > #spr.frames then
+        error("Invalid frameNumber at op " .. idx .. ".")
+      end
+      if type(op.durationMs) ~= "number" or math.floor(op.durationMs) ~= op.durationMs
+         or op.durationMs < 1 or op.durationMs > 60000 then
+        error("durationMs must be an integer between 1 and 60000 at op " .. idx .. ".")
+      end
+      local frame = spr.frames[op.frameNumber]
+      local fn = frame.frameNumber
+      if not resolvedFramesSet[fn] then
+        resolvedFramesSet[fn] = true
+        table.insert(resolvedFramesList, fn)
+      end
+      table.insert(plans, {
+        op = "set_frame_duration",
+        frame = frame,
+        durationMs = op.durationMs
+      })
+    end
+  end
+
+  if totalPixelsAndPoints > 100000 then
+    error("Total pixels and points across batch operations exceeds 100,000 limit.")
+  end
+  if #resolvedFramesList > 64 then
+    error("Total resolved frames exceeds limit of 64 frames.")
+  end
+
+  -- Phase 2: Plan and Simulation Cache
+  -- Cache indexed strictly by [layer][frameNumber] and kept in cacheList
+  local celCache = {}
+  local celCacheList = {}
+
+  local function getOrCreateCelCache(layer, frame)
+    local fn = frame.frameNumber
+    celCache[layer] = celCache[layer] or {}
+    if not celCache[layer][fn] then
+      local existingCel = layer:cel(frame)
+      local transPixel = getTransparentPixel(spr)
+      local workingImg = nil
+      if existingCel then
+        if existingCel.position.x == 0 and existingCel.position.y == 0
+           and existingCel.image.width == spr.width and existingCel.image.height == spr.height then
+          workingImg = existingCel.image:clone()
+        else
+          workingImg = Image(spr.spec)
+          workingImg:clear(transPixel)
+          if existingCel.image then
+            workingImg:drawImage(existingCel.image, existingCel.position)
+          end
+        end
+      else
+        workingImg = Image(spr.spec)
+        workingImg:clear(transPixel)
+      end
+      local entry = {
+        layer = layer,
+        frame = frame,
+        cel = existingCel,
+        img = workingImg,
+        originalPixels = {},
+        finalPixels = {},
+        origPosition = existingCel and { x = existingCel.position.x, y = existingCel.position.y } or nil,
+        finalPosition = nil,
+        origOpacity = existingCel and existingCel.opacity or nil,
+        finalOpacity = nil,
+        imageChanged = false,
+        positionChanged = false,
+        opacityChanged = false
+      }
+      celCache[layer][fn] = entry
+      table.insert(celCacheList, entry)
+    end
+    return celCache[layer][fn]
+  end
+
+  local frameDurationMap = {}
+  local frameDurationList = {}
+
+  -- Simulate changes to record final state
+  for _, plan in ipairs(plans) do
+    if plan.op == "set_pixels" or plan.op == "erase_pixels" then
+      local cacheEntry = getOrCreateCelCache(plan.layer, plan.frame)
+      local items = plan.op == "set_pixels" and plan.pixels or plan.points
+      for _, item in ipairs(items) do
+        local coordKey = item.x .. ":" .. item.y
+        if cacheEntry.originalPixels[coordKey] == nil then
+          cacheEntry.originalPixels[coordKey] = cacheEntry.img:getPixel(item.x, item.y)
+        end
+        cacheEntry.img:drawPixel(item.x, item.y, item.color)
+        cacheEntry.finalPixels[coordKey] = item.color
+      end
+
+    elseif plan.op == "set_cel_position" then
+      local cacheEntry = getOrCreateCelCache(plan.layer, plan.frame)
+      cacheEntry.finalPosition = { x = plan.x, y = plan.y }
+
+    elseif plan.op == "set_cel_opacity" then
+      local cacheEntry = getOrCreateCelCache(plan.layer, plan.frame)
+      cacheEntry.finalOpacity = plan.opacity
+
+    elseif plan.op == "set_frame_duration" then
+      if not frameDurationMap[plan.frame] then
+        local origMs = math.floor(plan.frame.duration * 1000 + 0.5)
+        frameDurationMap[plan.frame] = {
+          frame = plan.frame,
+          origDurationMs = origMs,
+          finalDurationMs = plan.durationMs,
+          changed = false
+        }
+        table.insert(frameDurationList, frameDurationMap[plan.frame])
+      else
+        frameDurationMap[plan.frame].finalDurationMs = plan.durationMs
+      end
+    end
+  end
+
+  -- Evaluate differences strictly against original state
+  local minX, minY = spr.width, spr.height
+  local maxX, maxY = -1, -1
+
+  local function updateBounds(x, y, w, h)
+    if w and h then
+      if x < minX then minX = x end
+      if y < minY then minY = y end
+      if (x + w - 1) > maxX then maxX = x + w - 1 end
+      if (y + h - 1) > maxY then maxY = y + h - 1 end
+    else
+      if x < minX then minX = x end
+      if y < minY then minY = y end
+      if x > maxX then maxX = x end
+      if y > maxY then maxY = y end
+    end
+  end
+
+  local totalPixelsChanged = 0
+  local framesTouchedSet = {}
+  local hasRealChange = false
+
+  -- Evaluate cel cache entries deterministically with ipairs
+  for _, entry in ipairs(celCacheList) do
+    local celPixelsChanged = 0
+    for coordKey, origColor in pairs(entry.originalPixels) do
+      local finalColor = entry.finalPixels[coordKey]
+      if finalColor ~= origColor then
+        celPixelsChanged = celPixelsChanged + 1
+        local colPos = string.find(coordKey, ":")
+        local px = tonumber(string.sub(coordKey, 1, colPos - 1))
+        local py = tonumber(string.sub(coordKey, colPos + 1))
+        updateBounds(px, py)
+      end
+    end
+
+    if celPixelsChanged > 0 then
+      entry.imageChanged = true
+      totalPixelsChanged = totalPixelsChanged + celPixelsChanged
+      framesTouchedSet[entry.frame.frameNumber] = true
+      hasRealChange = true
+    else
+      entry.imageChanged = false
+    end
+
+    if entry.finalPosition and entry.origPosition then
+      if entry.finalPosition.x ~= entry.origPosition.x or entry.finalPosition.y ~= entry.origPosition.y then
+        entry.positionChanged = true
+        framesTouchedSet[entry.frame.frameNumber] = true
+        hasRealChange = true
+        local ob = celBounds(entry.cel)
+        updateBounds(ob.x, ob.y, ob.width, ob.height)
+        updateBounds(entry.finalPosition.x, entry.finalPosition.y, ob.width, ob.height)
+      end
+    end
+
+    if entry.finalOpacity ~= nil and entry.origOpacity ~= nil then
+      if entry.finalOpacity ~= entry.origOpacity then
+        entry.opacityChanged = true
+        framesTouchedSet[entry.frame.frameNumber] = true
+        hasRealChange = true
+        local ob = celBounds(entry.cel)
+        updateBounds(ob.x, ob.y, ob.width, ob.height)
+      end
+    end
+  end
+
+  -- Evaluate duration entries deterministically with ipairs
+  for _, fd in ipairs(frameDurationList) do
+    if fd.finalDurationMs ~= fd.origDurationMs then
+      fd.changed = true
+      framesTouchedSet[fd.frame.frameNumber] = true
+      hasRealChange = true
+    end
+  end
+
+  local framesTouchedCount = 0
+  for _ in pairs(framesTouchedSet) do
+    framesTouchedCount = framesTouchedCount + 1
+  end
+
+  local bounds
+  if minX <= maxX and minY <= maxY then
+    bounds = {
+      x = minX,
+      y = minY,
+      width = maxX - minX + 1,
+      height = maxY - minY + 1
+    }
+  else
+    bounds = { x = 0, y = 0, width = 0, height = 0 }
+  end
+
+  -- If nothing changed in the final state, return without creating undo/revision
+  if not hasRealChange then
+    local noChangeResult = {
+      success = true,
+      changed = false,
+      revision = state.revision,
+      operationsApplied = 0,
+      framesTouched = 0,
+      pixelsChanged = 0,
+      bounds = bounds
+    }
+    if params and params.returnPreview and spr then
+      local previewFrame = (app.frame and app.frame.frameNumber) or 1
+      noChangeResult.pngBase64 = exportFramePngBase64(spr, previewFrame)
+    end
+    return noChangeResult
+  end
+
+  -- Phase 3: Execute inside single atomic transaction in deterministic order
+  executeMcpMutation(function()
+    app.transaction("MCP batch animation edits", function()
+      -- 1. Apply cel image mutations and/or creations via ipairs
+      for _, entry in ipairs(celCacheList) do
+        if entry.imageChanged then
+          if entry.cel then
+            entry.cel.position = Point(0, 0)
+            entry.cel.image = entry.img
+          else
+            entry.cel = spr:newCel(entry.layer, entry.frame, entry.img, Point(0, 0))
+          end
+        end
+        if entry.cel then
+          if entry.positionChanged then
+            entry.cel.position = Point(entry.finalPosition.x, entry.finalPosition.y)
+          end
+          if entry.opacityChanged then
+            entry.cel.opacity = entry.finalOpacity
+          end
+        end
+      end
+
+      -- 2. Apply frame duration changes via ipairs
+      for _, fd in ipairs(frameDurationList) do
+        if fd.changed then
+          fd.frame.duration = fd.finalDurationMs / 1000
+        end
+      end
+
+      app.refresh()
+    end)
+  end)
+
+  local primaryFrame = (resolvedFramesList[1]) or (app.frame and app.frame.frameNumber) or 1
+  return finishMutation(params, {
+    changed = true,
+    operationsApplied = opCount,
+    framesTouched = framesTouchedCount,
+    pixelsChanged = totalPixelsChanged
+  }, "animation", bounds, primaryFrame, false)
+end
+
 handlers.undo = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
@@ -2126,6 +2585,90 @@ handlers.unlink_cel = function(params)
   return finishMutation(params, { changed = true, layer = layer.name, frameNumber = frame.frameNumber, linked = false }, "cel", celBounds(cel), frame.frameNumber, false)
 end
 
+handlers.copy_cel = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local sourceLayer = resolveAnyLayer(spr, params, "sourceLayerName", "sourceLayerIndex")
+  local targetLayer = resolveAnyLayer(spr, params, "targetLayerName", "targetLayerIndex")
+  if not sourceLayer or sourceLayer.isGroup or not targetLayer or targetLayer.isGroup then
+    error("Source and target must be image layers.")
+  end
+  local sourceFrame = resolveTargetFrame(spr, params.sourceFrame)
+  local targetFrame = resolveTargetFrame(spr, params.targetFrame)
+  if sourceLayer == targetLayer and sourceFrame == targetFrame then
+    error("Source and target cel must be different.")
+  end
+  local sourceCel = sourceLayer:cel(sourceFrame)
+  if not sourceCel then error("Source cel not found.") end
+  local existing = targetLayer:cel(targetFrame)
+  if existing and params.replaceExisting ~= true then
+    error("Target cel already exists; set replaceExisting: true to replace it.")
+  end
+
+  local created = executeMcpMutation(function()
+    local c = nil
+    app.transaction("MCP copy cel", function()
+      if existing then spr:deleteCel(existing) end
+      c = spr:newCel(targetLayer, targetFrame, sourceCel.image:clone(), sourceCel.position)
+      c.opacity = sourceCel.opacity
+      pcall(function() c.zIndex = sourceCel.zIndex end)
+      pcall(function() c.color = sourceCel.color end)
+      pcall(function() c.data = sourceCel.data end)
+    end)
+    app.refresh()
+    return c
+  end)
+
+  return finishMutation(params, {
+    sourceLayer = sourceLayer.name,
+    sourceFrame = sourceFrame.frameNumber,
+    targetLayer = targetLayer.name,
+    targetFrame = targetFrame.frameNumber,
+    copied = true
+  }, "cel", celBounds(created), targetFrame.frameNumber, false)
+end
+
+handlers.move_cel = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local sourceLayer = resolveAnyLayer(spr, params, "sourceLayerName", "sourceLayerIndex")
+  local targetLayer = resolveAnyLayer(spr, params, "targetLayerName", "targetLayerIndex")
+  if not sourceLayer or sourceLayer.isGroup or not targetLayer or targetLayer.isGroup then
+    error("Source and target must be image layers.")
+  end
+  if sourceLayer ~= targetLayer then
+    error("Cross-layer move is not supported.")
+  end
+  local sourceFrame = resolveTargetFrame(spr, params.sourceFrame)
+  local targetFrame = resolveTargetFrame(spr, params.targetFrame)
+  if sourceFrame == targetFrame then
+    error("Source and target cel must be different.")
+  end
+  local sourceCel = sourceLayer:cel(sourceFrame)
+  if not sourceCel then error("Source cel not found.") end
+  local existing = targetLayer:cel(targetFrame)
+  if existing and params.replaceExisting ~= true then
+    error("Target cel already exists; set replaceExisting: true to replace it.")
+  end
+
+  local moved = executeMcpMutation(function()
+    app.transaction("MCP move cel", function()
+      if existing then spr:deleteCel(existing) end
+      sourceCel.frame = targetFrame
+    end)
+    app.refresh()
+    return sourceCel
+  end)
+
+  return finishMutation(params, {
+    sourceLayer = sourceLayer.name,
+    sourceFrame = sourceFrame.frameNumber,
+    targetLayer = targetLayer.name,
+    targetFrame = targetFrame.frameNumber,
+    moved = true
+  }, "cel", celBounds(moved), targetFrame.frameNumber, false)
+end
+
 -- Recursive layer/group and composition tools
 handlers.list_layer_tree = function(params)
   local spr = app.sprite
@@ -2753,12 +3296,21 @@ handlers.inspect_animation = function(params)
       if layer.isGroup then
         node.children = visit(layer, layerPath)
       else
+        node.cels = {}
         for _, cel in ipairs(layer.cels or {}) do
           totalCels = totalCels + 1
           if totalCels > 100000 then error("Animation inspection is limited to 100,000 cels.") end
           node.celCount = node.celCount + 1
           table.insert(node.celFrames, cel.frame.frameNumber)
           frameCelCounts[cel.frame.frameNumber] = (frameCelCounts[cel.frame.frameNumber] or 0) + 1
+          local b = celBounds(cel)
+          table.insert(node.cels, {
+            frameNumber = cel.frame.frameNumber,
+            x = cel.position.x,
+            y = cel.position.y,
+            bounds = b,
+            position = { x = cel.position.x, y = cel.position.y }
+          })
         end
       end
       table.insert(nodes, node)
@@ -2903,6 +3455,187 @@ handlers.set_frame_duration = function(params)
   return finishMutation(params, { frameNumber = f.frameNumber, durationMs = params.durationMs }, "frames", rectToTable(spr.bounds), f.frameNumber, false)
 end
 
+handlers.move_frame = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  local fromFrame = params.fromFrame
+  local toFrame = params.toFrame
+  if type(fromFrame) ~= "number" or math.floor(fromFrame) ~= fromFrame or fromFrame < 1 or fromFrame > #spr.frames then
+    error("Invalid fromFrame: " .. tostring(fromFrame))
+  end
+  if type(toFrame) ~= "number" or math.floor(toFrame) ~= toFrame or toFrame < 1 or toFrame > #spr.frames then
+    error("Invalid toFrame: " .. tostring(toFrame))
+  end
+
+  if fromFrame == toFrame then
+    return {
+      success = true,
+      fromFrame = fromFrame,
+      toFrame = toFrame,
+      moved = false,
+      revision = state.revision
+    }
+  end
+
+  executeMcpMutation(function()
+    app.transaction("MCP move frame", function()
+      local totalFrames = #spr.frames
+      local originalDurations = {}
+      for i = 1, totalFrames do
+        originalDurations[i] = spr.frames[i].duration
+      end
+
+      local tempFrame = spr:newEmptyFrame(totalFrames + 1)
+
+      local imageLayers = {}
+      local function collectImageLayers(container)
+        for _, l in ipairs(container.layers or {}) do
+          if l.isImage then
+            table.insert(imageLayers, l)
+          elseif l.isGroup then
+            collectImageLayers(l)
+          end
+        end
+      end
+      collectImageLayers(spr)
+
+      for _, layer in ipairs(imageLayers) do
+        local fromCel = layer:cel(spr.frames[fromFrame])
+        if fromCel then
+          fromCel.frame = tempFrame
+        end
+
+        if fromFrame < toFrame then
+          for f = fromFrame + 1, toFrame do
+            local c = layer:cel(spr.frames[f])
+            if c then
+              c.frame = spr.frames[f - 1]
+            end
+          end
+        else
+          for f = fromFrame - 1, toFrame, -1 do
+            local c = layer:cel(spr.frames[f])
+            if c then
+              c.frame = spr.frames[f + 1]
+            end
+          end
+        end
+
+        local tempCel = layer:cel(tempFrame)
+        if tempCel then
+          tempCel.frame = spr.frames[toFrame]
+        end
+      end
+
+      if fromFrame < toFrame then
+        for i = fromFrame, toFrame - 1 do
+          spr.frames[i].duration = originalDurations[i + 1]
+        end
+        spr.frames[toFrame].duration = originalDurations[fromFrame]
+      else
+        for i = toFrame + 1, fromFrame do
+          spr.frames[i].duration = originalDurations[i - 1]
+        end
+        spr.frames[toFrame].duration = originalDurations[fromFrame]
+      end
+
+      spr:deleteFrame(tempFrame)
+    end)
+    app.refresh()
+  end)
+
+  return finishMutation(params, {
+    fromFrame = fromFrame,
+    toFrame = toFrame,
+    moved = true,
+    totalFrames = #spr.frames
+  }, "frames", rectToTable(spr.bounds), toFrame, true)
+end
+
+handlers.set_frame_durations = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+
+  local hasDurations = params.durations ~= nil
+  local hasRangePart = params.fromFrame ~= nil or params.toFrame ~= nil or params.durationMs ~= nil
+
+  if hasDurations and hasRangePart then
+    error("Cannot mix durations and range parameters (fromFrame, toFrame, durationMs).")
+  end
+  if not hasDurations and not hasRangePart then
+    error("Must provide either durations or fromFrame, toFrame, and durationMs.")
+  end
+
+  local normalizedDurations = {}
+
+  if hasRangePart then
+    local fromFrame = params.fromFrame
+    local toFrame = params.toFrame
+    local durationMs = params.durationMs
+
+    if fromFrame == nil or toFrame == nil or durationMs == nil then
+      error("Range mode requires fromFrame, toFrame, and durationMs.")
+    end
+    if type(fromFrame) ~= "number" or math.floor(fromFrame) ~= fromFrame or fromFrame < 1 or fromFrame > #spr.frames then
+      error("Invalid fromFrame: " .. tostring(fromFrame))
+    end
+    if type(toFrame) ~= "number" or math.floor(toFrame) ~= toFrame or toFrame < 1 or toFrame > #spr.frames then
+      error("Invalid toFrame: " .. tostring(toFrame))
+    end
+    if fromFrame > toFrame then
+      error("fromFrame must be <= toFrame")
+    end
+    if (toFrame - fromFrame + 1) > 256 then
+      error("Range exceeds maximum of 256 frames.")
+    end
+    if type(durationMs) ~= "number" or math.floor(durationMs) ~= durationMs or durationMs < 1 or durationMs > 60000 then
+      error("durationMs must be an integer between 1 and 60000.")
+    end
+
+    for fn = fromFrame, toFrame do
+      table.insert(normalizedDurations, { frameNumber = fn, durationMs = durationMs })
+    end
+  else
+    if type(params.durations) ~= "table" or #params.durations < 1 or #params.durations > 256 then
+      error("durations must be a list with 1 to 256 items.")
+    end
+    normalizedDurations = params.durations
+  end
+
+  local seenFrames = {}
+  for _, item in ipairs(normalizedDurations) do
+    local fn = item.frameNumber
+    local dur = item.durationMs
+    if type(fn) ~= "number" or math.floor(fn) ~= fn or fn < 1 or fn > #spr.frames then
+      error("Invalid frameNumber: " .. tostring(fn))
+    end
+    if seenFrames[fn] then
+      error('Duplicate frameNumber: '..tostring(fn))
+    end
+    seenFrames[fn] = true
+    if type(dur) ~= "number" or math.floor(dur) ~= dur or dur < 1 or dur > 60000 then
+      error("durationMs must be an integer between 1 and 60000.")
+    end
+  end
+
+  local updatedCount = 0
+  executeMcpMutation(function()
+    app.transaction("MCP set frame durations", function()
+      for _, item in ipairs(normalizedDurations) do
+        local f = spr.frames[item.frameNumber]
+        f.duration = item.durationMs / 1000
+        updatedCount = updatedCount + 1
+      end
+    end)
+    app.refresh()
+  end)
+
+  return finishMutation(params, {
+    updatedFrames = updatedCount,
+    durations = normalizedDurations
+  }, "frames", rectToTable(spr.bounds), nil, false)
+end
+
 handlers.create_tag = function(params)
   local spr = app.sprite
   if not spr then error("No active sprite.") end
@@ -2966,6 +3699,170 @@ handlers.list_tags = function(params)
     table.insert(tags, item)
   end
   return { tags = tags }
+end
+
+handlers.update_tag = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if not params.name or type(params.name) ~= "string" then error("Tag name is required.") end
+  local targetTag = nil
+  for _, t in ipairs(spr.tags) do
+    if t.name == params.name then
+      targetTag = t
+      break
+    end
+  end
+  if not targetTag then error("Tag not found: " .. tostring(params.name)) end
+
+  if params.newName and params.newName ~= targetTag.name then
+    for _, t in ipairs(spr.tags) do
+      if t ~= targetTag and t.name == params.newName then
+        error("Tag already exists: " .. tostring(params.newName))
+      end
+    end
+  end
+
+  local fromFrame = params.fromFrame or targetTag.fromFrame.frameNumber
+  local toFrame = params.toFrame or targetTag.toFrame.frameNumber
+  if type(fromFrame) ~= "number" or math.floor(fromFrame) ~= fromFrame or fromFrame < 1 or fromFrame > #spr.frames then
+    error("Invalid fromFrame: " .. tostring(fromFrame))
+  end
+  if type(toFrame) ~= "number" or math.floor(toFrame) ~= toFrame or toFrame < 1 or toFrame > #spr.frames then
+    error("Invalid toFrame: " .. tostring(toFrame))
+  end
+  if fromFrame > toFrame then
+    error("fromFrame must be <= toFrame")
+  end
+
+  local directions = {
+    forward = AniDir.FORWARD,
+    reverse = AniDir.REVERSE,
+    pingpong = AniDir.PING_PONG,
+    pingpong_reverse = AniDir.PING_PONG_REVERSE
+  }
+  local newDir = params.direction and directions[params.direction]
+  if params.direction and not newDir then
+    error("Invalid tag direction: " .. tostring(params.direction))
+  end
+
+  if params.repeats ~= nil then
+    if type(params.repeats) ~= "number" or math.floor(params.repeats) ~= params.repeats or params.repeats < 0 or params.repeats > 65535 then
+      error("repeats must be an integer between 0 and 65535.")
+    end
+  end
+
+  local finalName = params.newName or targetTag.name
+  local finalFrom = fromFrame
+  local finalTo = toFrame
+  local finalDir = newDir or targetTag.aniDir
+  local finalRepeats = params.repeats ~= nil and params.repeats or (targetTag.repeats or 0)
+
+  local colorChanged = false
+  local targetRgba = nil
+  if params.color then
+    targetRgba = parseHexRgba(params.color)
+    if not targetTag.color then
+      colorChanged = true
+    else
+      local tr = targetTag.color.red or targetTag.color.r
+      local tg = targetTag.color.green or targetTag.color.g
+      local tb = targetTag.color.blue or targetTag.color.b
+      local ta = targetTag.color.alpha or targetTag.color.a
+      if tr ~= targetRgba.r or tg ~= targetRgba.g or tb ~= targetRgba.b or ta ~= targetRgba.a then
+        colorChanged = true
+      end
+    end
+  end
+
+  local nameChanged = (finalName ~= targetTag.name)
+  local rangeChanged = (finalFrom ~= targetTag.fromFrame.frameNumber or finalTo ~= targetTag.toFrame.frameNumber)
+  local dirChanged = (finalDir ~= targetTag.aniDir)
+  local repeatsChanged = (finalRepeats ~= (targetTag.repeats or 0))
+
+  if not nameChanged and not rangeChanged and not dirChanged and not repeatsChanged and not colorChanged then
+    return {
+      success = true,
+      changed = false,
+      tag = targetTag.name,
+      fromFrame = targetTag.fromFrame.frameNumber,
+      toFrame = targetTag.toFrame.frameNumber,
+      repeats = targetTag.repeats or 0,
+      revision = state.revision
+    }
+  end
+
+  local updatedTag = executeMcpMutation(function()
+    local finalTag = targetTag
+    app.transaction("MCP update tag", function()
+      local name = finalName
+      local dir = finalDir
+      local rep = finalRepeats
+      local col = targetTag.color
+      if targetRgba then
+        col = Color{ r = targetRgba.r, g = targetRgba.g, b = targetRgba.b, a = targetRgba.a }
+      end
+
+      if rangeChanged then
+        local tagData = nil
+        pcall(function() tagData = targetTag.data end)
+        spr:deleteTag(targetTag)
+        finalTag = spr:newTag(finalFrom, finalTo)
+        finalTag.name = name
+        finalTag.aniDir = dir
+        finalTag.repeats = rep
+        if col then finalTag.color = col end
+        if tagData ~= nil then
+          pcall(function() finalTag.data = tagData end)
+        end
+      else
+        finalTag.name = name
+        finalTag.aniDir = dir
+        finalTag.repeats = rep
+        if col then finalTag.color = col end
+      end
+    end)
+    app.refresh()
+    return finalTag
+  end)
+
+  return finishMutation(params, {
+    changed = true,
+    tag = updatedTag.name,
+    fromFrame = updatedTag.fromFrame.frameNumber,
+    toFrame = updatedTag.toFrame.frameNumber,
+    repeats = updatedTag.repeats or 0
+  }, "tags", rectToTable(spr.bounds), nil, false)
+end
+
+handlers.delete_tag = function(params)
+  local spr = app.sprite
+  if not spr then error("No active sprite.") end
+  if params.confirm ~= true then error("delete_tag requires confirm: true") end
+  if not params.name or type(params.name) ~= "string" then error("Tag name is required.") end
+  local targetTag = nil
+  for _, t in ipairs(spr.tags) do
+    if t.name == params.name then
+      targetTag = t
+      break
+    end
+  end
+  if not targetTag then error("Tag not found: " .. tostring(params.name)) end
+
+  local meta = {
+    name = targetTag.name,
+    fromFrame = targetTag.fromFrame.frameNumber,
+    toFrame = targetTag.toFrame.frameNumber,
+    repeats = targetTag.repeats or 0
+  }
+
+  executeMcpMutation(function()
+    app.transaction("MCP delete tag", function()
+      spr:deleteTag(targetTag)
+    end)
+    app.refresh()
+  end)
+
+  return finishMutation(params, { tag = meta.name, deleted = true, metadata = meta }, "tags", rectToTable(spr.bounds), nil, false)
 end
 
 handlers.render_animation_gif = function(params)
@@ -3328,13 +4225,15 @@ local function initWebSocket(dlg)
             revision = state.revision,
             token = BRIDGE_TOKEN,
             capabilities = {
+              animationBatch = true,
               changeJournal = true,
               frameEvents = true,
               layerEvents = true,
               animationGif = true,
               animationInspection = true,
               referenceImageDecode = true,
-              safeJson = true
+              safeJson = true,
+              timelineEditing = true
             }
           }
         }

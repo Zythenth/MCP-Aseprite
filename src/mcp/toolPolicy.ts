@@ -13,12 +13,16 @@ export const MUTATING_TOOLS = new Set([
   "create_layer", "rename_layer", "delete_layer", "set_layer_visibility", "set_layer_opacity", "move_layer",
   "create_group", "move_layer_to_group", "ungroup_layer", "set_layer_blend_mode", "merge_down_layer", "flatten_layers",
   "create_frame", "duplicate_frame", "delete_frame", "set_frame_duration", "create_tag",
+  "move_frame", "set_frame_durations", "update_tag", "delete_tag",
   "set_palette_color",
   "create_cel", "delete_cel", "set_cel_position", "set_cel_opacity", "link_cel", "unlink_cel",
+  "copy_cel", "move_cel",
   "create_slice", "update_slice", "delete_slice",
   "set_selection", "clear_selection", "invert_selection",
   "create_tileset", "delete_tileset", "set_tile_pixels", "create_tilemap_layer", "set_tiles",
   "apply_ordered_dither",
+  "batch_animation_edits",
+  "reset_animation_workflow",
 ]);
 
 export function createPolicyToolRegistrar(server: McpServer, readOnly: boolean): McpServer {

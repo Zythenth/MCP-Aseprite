@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CommandDispatcher } from "../../bridge/dispatcher.js";
 import type { BridgeState } from "../../bridge/state.js";
-import { bridgeToolError, bridgeToolResult, confirmationError } from "./common.js";
+import { bridgeToolError, bridgeToolResult, confirmationError, requireBridgeCapability } from "./common.js";
 
 const layerSelector = {
   layerName: z.string().min(1).max(128).optional().describe("Target layer name; mutually exclusive with layerIndex"),
@@ -91,5 +91,37 @@ export function registerCelTools(server: McpServer, dispatcher: CommandDispatche
   }, async (params) => {
     try { return bridgeToolResult(await dispatcher.send("unlink_cel", params, 10000), state, params.returnPreview); }
     catch (error) { return bridgeToolError(error); }
+  });
+
+  server.tool("copy_cel", "Copies a cel independently to another image layer/frame, preserving its position and opacity.", {
+    sourceLayerName: z.string().min(1).max(128).optional(),
+    sourceLayerIndex: z.number().int().min(0).optional(),
+    sourceFrame: z.number().int().positive(),
+    targetLayerName: z.string().min(1).max(128).optional(),
+    targetLayerIndex: z.number().int().min(0).optional(),
+    targetFrame: z.number().int().positive(),
+    replaceExisting: z.boolean().optional().default(false),
+    returnPreview: z.boolean().optional().default(false),
+  }, async (params) => {
+    try {
+      requireBridgeCapability(state, "timelineEditing");
+      return bridgeToolResult(await dispatcher.send("copy_cel", params, 10000), state, params.returnPreview);
+    } catch (error) { return bridgeToolError(error); }
+  });
+
+  server.tool("move_cel", "Moves a cel between frames in the same layer, preserving identity and metadata. Movement between layers is not supported.", {
+    sourceLayerName: z.string().min(1).max(128).optional(),
+    sourceLayerIndex: z.number().int().min(0).optional(),
+    sourceFrame: z.number().int().positive(),
+    targetLayerName: z.string().min(1).max(128).optional(),
+    targetLayerIndex: z.number().int().min(0).optional(),
+    targetFrame: z.number().int().positive(),
+    replaceExisting: z.boolean().optional().default(false),
+    returnPreview: z.boolean().optional().default(false),
+  }, async (params) => {
+    try {
+      requireBridgeCapability(state, "timelineEditing");
+      return bridgeToolResult(await dispatcher.send("move_cel", params, 10000), state, params.returnPreview);
+    } catch (error) { return bridgeToolError(error); }
   });
 }

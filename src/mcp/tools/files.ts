@@ -27,6 +27,7 @@ import {
   type AnimationInspection,
 } from "../animationSelection.js";
 import { bridgeToolResult } from "./common.js";
+import type { AnimationWorkflowState, CompactCompletionEvidence } from "../animationWorkflowState.js";
 
 const MAX_REFERENCE_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_REFERENCE_DIMENSION = 4096;
@@ -189,7 +190,8 @@ function requireFileStem(value: string): string {
 export function registerFileTools(
   server: McpServer,
   dispatcher: CommandDispatcher,
-  stateTracker: BridgeState
+  stateTracker: BridgeState,
+  workflowState?: AnimationWorkflowState
 ): void {
   // 1. new_sprite
   server.tool(
@@ -621,21 +623,55 @@ export function registerFileTools(
         const projectRoot = resolveProjectRoot(undefined, roots);
         const transparency = alphaSummary(image);
         const palette = analyzeImagePalette(image, params.nearDuplicateThreshold ?? 3);
+        const referenceId = createHash("sha256").update(source).digest("hex");
+        const hash = referenceId;
+        const observedPalette = Array.isArray((palette as any).colors)
+          ? (palette as any).colors.map((c: any) => c.hex)
+          : [];
+
+        const sessionId = typeof stateTracker?.getSessionId === "function" ? stateTracker.getSessionId() : null;
+        const isConnected = typeof stateTracker?.isConnected === "function" ? stateTracker.isConnected() : false;
+        const hasActiveSession = isConnected && Boolean(sessionId && sessionId !== "default");
+
+        if (hasActiveSession && sessionId && workflowState) {
+          workflowState.registerLoadedReference({
+            referenceId,
+            hash,
+            filePath: canonicalPath,
+            fileName: path.basename(canonicalPath),
+            projectRelativePath: isPathWithinRoots(canonicalPath, [projectRoot])
+              ? path.relative(projectRoot, canonicalPath).replace(/\\/g, "/")
+              : null,
+            sourceFormat: extension.slice(1),
+            dimensions: { width: image.width, height: image.height },
+            sourceDimensions,
+            transparency,
+            observedPalette,
+            palette,
+            sessionId,
+            recordedAt: new Date().toISOString(),
+          });
+        }
+
         return { content: [
           { type: "image" as const, data: pngBase64, mimeType: "image/png" },
           { type: "text" as const, text: JSON.stringify({
-            referenceId: createHash("sha256").update(source).digest("hex"),
+            referenceId,
+            hash,
             fileName: path.basename(canonicalPath),
             filePath: canonicalPath,
             projectRelativePath: isPathWithinRoots(canonicalPath, [projectRoot])
               ? path.relative(projectRoot, canonicalPath).replace(/\\/g, "/")
               : null,
             sourceFormat: extension.slice(1),
-          width: image.width,
-          height: image.height,
-          sourceDimensions,
+            width: image.width,
+            height: image.height,
+            sourceDimensions,
+            transparency,
             ...transparency,
+            observedPalette,
             palette,
+            recordedInWorkflow: hasActiveSession && Boolean(workflowState),
           }, null, 2) },
         ] };
       } catch (error: any) {
@@ -662,6 +698,8 @@ export function registerFileTools(
       columns: z.number().int().min(1).max(64).optional(),
       spacing: z.number().int().min(0).max(64).optional().default(0),
       overwrite: z.boolean().optional().default(false),
+      final: z.boolean().optional().default(false).describe("Whether this export represents final delivery gated by animation workflow completion"),
+      strictWorkflowValidation: z.boolean().optional().default(false).describe("Whether strict workflow validation is enforced"),
     },
     async (params: {
       format: "gif" | "sprite_sheet" | "png_sequence" | "png" | "apng";
@@ -678,11 +716,100 @@ export function registerFileTools(
       columns?: number;
       spacing?: number;
       overwrite?: boolean;
+      final?: boolean;
+      strictWorkflowValidation?: boolean;
     }) => {
       try {
         if (params.format === "apng") {
           throw new Error("APNG export is not supported by the current Aseprite bridge. Use GIF or PNG sequence.");
         }
+        const isFinal = Boolean(params.final);
+        const isStrict = Boolean(params.strictWorkflowValidation);
+        const activeWorkflow = workflowState?.getWorkflow() ?? null;
+        const gateRequired = isFinal && (isStrict || Boolean(activeWorkflow?.strictCompletionRequired));
+
+        let completionEvidence: CompactCompletionEvidence | undefined;
+        if (gateRequired) {
+          if (!workflowState || !activeWorkflow) {
+            const currentRevision = workflowState ? workflowState.getRevision() : stateTracker.getRevision();
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    {
+                      success: false,
+                      code: "WORKFLOW_COMPLETION_REQUIRED",
+                      error: "Final export requires an active animation workflow and completion verification.",
+                      currentRevision,
+                      failedGates: [{ name: "workflowExists", message: "No active animation workflow." }],
+                      failedGateNames: ["workflowExists"],
+                      unresolvedCounts: { critical: 0, high: 0, medium: 0, low: 0 },
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const validation = workflowState.validateCompletion();
+          if (!validation.isComplete) {
+            const failedGates = Object.entries(validation.gates)
+              .filter(([_, g]) => !g.passed)
+              .map(([name, g]) => ({ name, message: g.message }));
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    {
+                      success: false,
+                      code: "WORKFLOW_COMPLETION_REQUIRED",
+                      error: "Final export blocked: animation workflow completion criteria not met.",
+                      currentRevision: validation.currentRevision,
+                      failedGates,
+                      failedGateNames: failedGates.map((g) => g.name),
+                      unresolvedCounts: validation.unresolvedFindings,
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const evidence = workflowState.getCompletionEvidence();
+          if (!evidence) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    {
+                      success: false,
+                      code: "WORKFLOW_COMPLETION_REQUIRED",
+                      error: "Final export blocked: current completion evidence is unavailable.",
+                      currentRevision: validation.currentRevision,
+                      failedGates: [{ name: "completionEvidence", message: "Current completion evidence is unavailable." }],
+                      failedGateNames: ["completionEvidence"],
+                      unresolvedCounts: validation.unresolvedFindings,
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+          completionEvidence = evidence;
+        }
+
         const capabilities = stateTracker.getCapabilities();
         if (!capabilities.animationInspection) {
           throw new Error("The connected Aseprite bridge cannot inspect animations. Reinstall the bundled Lua bridge.");
@@ -738,6 +865,7 @@ export function registerFileTools(
             playback,
             scale,
             overwrite,
+            ...(completionEvidence ? { completionEvidence } : {}),
           }, null, 2) }] };
         }
 
@@ -760,7 +888,12 @@ export function registerFileTools(
             scale,
             loop: params.loop ?? playback.loopsContinuously,
           }, 60_000);
-          return { content: [{ type: "text" as const, text: JSON.stringify({ ...result, format: params.format, playback }, null, 2) }] };
+          return { content: [{ type: "text" as const, text: JSON.stringify({
+            ...result,
+            format: params.format,
+            playback,
+            ...(completionEvidence ? { completionEvidence } : {}),
+          }, null, 2) }] };
         }
 
         const outputPath = validateExportPngPath(params.outputPath, overwrite, roots, true, projectRoot);
@@ -772,7 +905,13 @@ export function registerFileTools(
             scale,
             overwrite,
           }, 15_000);
-          return { content: [{ type: "text" as const, text: JSON.stringify({ ...result, format: params.format, playback, sourceFrame }, null, 2) }] };
+          return { content: [{ type: "text" as const, text: JSON.stringify({
+            ...result,
+            format: params.format,
+            playback,
+            sourceFrame,
+            ...(completionEvidence ? { completionEvidence } : {}),
+          }, null, 2) }] };
         }
 
         const result = await dispatcher.send<any>("export_sprite_sheet", {
@@ -784,7 +923,12 @@ export function registerFileTools(
           scale,
           overwrite,
         }, 30_000);
-        return { content: [{ type: "text" as const, text: JSON.stringify({ ...result, format: params.format, playback }, null, 2) }] };
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          ...result,
+          format: params.format,
+          playback,
+          ...(completionEvidence ? { completionEvidence } : {}),
+        }, null, 2) }] };
       } catch (error: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };
       }

@@ -488,9 +488,13 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(inspectBody).toContain("durationMs = durationMs");
       expect(inspectBody).toContain("repeats = tag.repeats or 0");
       expect(inspectBody).toContain("totalDurationMs = totalDurationMs");
+      expect(inspectBody).toContain("node.cels = {}");
+      expect(inspectBody).toContain("frameNumber = cel.frame.frameNumber");
+      expect(inspectBody).toContain("bounds = b");
+      expect(inspectBody).toContain("position = { x = cel.position.x, y = cel.position.y }");
 
       expect(luaContent).toMatch(/handlers\.render_animation_gif\s*=\s*function/);
-      const helperMatch = /local\s+function\s+renderAnimationGif\s*\(params\)([\s\S]*?)(?=\n\s*-- -+\n\s*-- Helper: Ensure Canvas-Sized Cel)/.exec(luaContent);
+      const helperMatch = /local\s+function\s+renderAnimationGif\s*\(params\)([\s\S]*?)(?=\r?\n\s*-- -+\r?\n\s*-- Helper: Ensure Canvas-Sized Cel)/.exec(luaContent);
       expect(helperMatch).not.toBeNull();
       const helperBody = helperMatch![1];
       expect(helperBody).toContain("#params.frameNumbers > 64");
@@ -582,6 +586,182 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
 
       // 6. Zero hardcoded secrets
       expect(luaContent).not.toMatch(/token\s*=\s*["'][A-Za-z0-9]{16,}["']/);
+    });
+
+    it("validates move_frame contract: Cel.frame, single app.transaction, temporary frame, deleteFrame, and absence of forbidden operations", () => {
+      const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
+      const luaContent = fs.readFileSync(luaPath, "utf-8");
+
+      const handlerMatch = /handlers\.move_frame\s*=\s*function\s*\(params\)([\s\S]*?)(?=\r?\nhandlers\.set_frame_durations)/.exec(luaContent);
+      expect(handlerMatch).not.toBeNull();
+      const body = handlerMatch![1];
+
+      // Verifying Cel.frame
+      expect(body).toMatch(/\.frame\s*=/);
+
+      // Single app.transaction
+      const transactions = body.match(/app\.transaction\s*\(/g);
+      expect(transactions).not.toBeNull();
+      expect(transactions!.length).toBe(1);
+
+      // Temporary frame and deleteFrame
+      expect(body).toMatch(/newEmptyFrame|newFrame/);
+      expect(body).toContain("deleteFrame");
+
+      // Absence in handler body of newCel, app.command, LinkCels, and deleteCel
+      expect(body).not.toContain("newCel");
+      expect(body).not.toContain("app.command");
+      expect(body).not.toContain("LinkCels");
+      expect(body).not.toContain("deleteCel");
+    });
+
+    it("validates set_frame_durations contract: handles both modes, 256 limit, and validates/normalizes before executeMcpMutation", () => {
+      const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
+      const luaContent = fs.readFileSync(luaPath, "utf-8");
+
+      const handlerMatch = /handlers\.set_frame_durations\s*=\s*function\s*\(params\)([\s\S]*?)(?=\r?\nhandlers\.create_tag)/.exec(luaContent);
+      expect(handlerMatch).not.toBeNull();
+      const body = handlerMatch![1];
+
+      // Confirme a presença dos dois modos (Mode A: explicit durations list, Mode B: range parameters)
+      expect(body).toContain("hasDurations");
+      expect(body).toContain("hasRangePart");
+      expect(body).toMatch(/params\.durations/);
+      expect(body).toMatch(/fromFrame/);
+      expect(body).toMatch(/toFrame/);
+      expect(body).toMatch(/durationMs/);
+
+      // Limite 256
+      expect(body).toMatch(/256/);
+
+      // Confirme que todas as validações/normalização aparecem antes de executeMcpMutation
+      const mutationIdx = body.indexOf("executeMcpMutation");
+      expect(mutationIdx).toBeGreaterThan(-1);
+
+      const mixValidationIdx = body.indexOf("Cannot mix durations and range parameters");
+      const missingModeValidationIdx = body.indexOf("Must provide either durations or fromFrame");
+      const rangeRequiredValidationIdx = body.indexOf("Range mode requires fromFrame, toFrame, and durationMs");
+      const fromFrameValidationIdx = body.indexOf("Invalid fromFrame");
+      const toFrameValidationIdx = body.indexOf("Invalid toFrame");
+      const orderValidationIdx = body.indexOf("fromFrame must be <= toFrame");
+      const rangeLimitIdx = body.indexOf("Range exceeds maximum of 256 frames");
+      const listLimitIdx = body.indexOf("durations must be a list with 1 to 256 items");
+      const duplicateFrameValidationIdx = body.indexOf("Duplicate frameNumber");
+      const normalizationIdx = body.indexOf("local normalizedDurations = {}");
+
+      expect(mixValidationIdx).toBeGreaterThan(-1);
+      expect(missingModeValidationIdx).toBeGreaterThan(-1);
+      expect(rangeRequiredValidationIdx).toBeGreaterThan(-1);
+      expect(fromFrameValidationIdx).toBeGreaterThan(-1);
+      expect(toFrameValidationIdx).toBeGreaterThan(-1);
+      expect(orderValidationIdx).toBeGreaterThan(-1);
+      expect(rangeLimitIdx).toBeGreaterThan(-1);
+      expect(listLimitIdx).toBeGreaterThan(-1);
+      expect(duplicateFrameValidationIdx).toBeGreaterThan(-1);
+      expect(normalizationIdx).toBeGreaterThan(-1);
+
+      expect(mixValidationIdx).toBeLessThan(mutationIdx);
+      expect(missingModeValidationIdx).toBeLessThan(mutationIdx);
+      expect(rangeRequiredValidationIdx).toBeLessThan(mutationIdx);
+      expect(fromFrameValidationIdx).toBeLessThan(mutationIdx);
+      expect(toFrameValidationIdx).toBeLessThan(mutationIdx);
+      expect(orderValidationIdx).toBeLessThan(mutationIdx);
+      expect(rangeLimitIdx).toBeLessThan(mutationIdx);
+      expect(listLimitIdx).toBeLessThan(mutationIdx);
+      expect(duplicateFrameValidationIdx).toBeLessThan(mutationIdx);
+      expect(normalizationIdx).toBeLessThan(mutationIdx);
+    });
+
+    it("validates update_tag handler checks duplicate name and no-op before mutation, and preserves tag data", () => {
+      const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
+      const luaContent = fs.readFileSync(luaPath, "utf-8");
+
+      const handlerMatch = /handlers\.update_tag\s*=\s*function\s*\(params\)([\s\S]*?)(?=\r?\nhandlers\.delete_tag)/.exec(luaContent);
+      expect(handlerMatch).not.toBeNull();
+      const body = handlerMatch![1];
+
+      const existsIdx = body.indexOf("Tag already exists");
+      const noOpMatch = /changed\s*=\s*false/.exec(body);
+      const mutationIdx = body.indexOf("executeMcpMutation");
+
+      expect(existsIdx).toBeGreaterThan(-1);
+      expect(noOpMatch).not.toBeNull();
+      expect(mutationIdx).toBeGreaterThan(-1);
+
+      expect(existsIdx).toBeLessThan(mutationIdx);
+      expect(noOpMatch!.index).toBeLessThan(mutationIdx);
+
+      expect(body).toContain("targetTag.data");
+      expect(body).toContain("finalTag.data");
+    });
+
+    it("validates batch_animation_edits handler contract: capability, allowlist, validation before mutation, single atomic transaction, no dynamic dispatch, cache by object+ipairs, and early no-op", () => {
+      const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
+      const luaContent = fs.readFileSync(luaPath, "utf-8");
+
+      // 1. Capability advertisement
+      expect(luaContent).toMatch(/animationBatch\s*=\s*true/);
+
+      // 2. Extract handler body up to handlers.undo
+      const handlerMatch = /handlers\.batch_animation_edits\s*=\s*function\s*\(params\)([\s\S]*?)(?=\r?\nhandlers\.undo\s*=)/.exec(luaContent);
+      expect(handlerMatch).not.toBeNull();
+      const body = handlerMatch![1];
+
+      // 3. Explicit allowlist
+      expect(body).toMatch(/set_pixels\s*=\s*true/);
+      expect(body).toMatch(/erase_pixels\s*=\s*true/);
+      expect(body).toMatch(/set_cel_position\s*=\s*true/);
+      expect(body).toMatch(/set_cel_opacity\s*=\s*true/);
+      expect(body).toMatch(/set_frame_duration\s*=\s*true/);
+
+      // 4. Exactly 1 executeMcpMutation and 1 app.transaction
+      const executeMutationMatches = body.match(/executeMcpMutation/g) || [];
+      const appTransactionMatches = body.match(/app\.transaction/g) || [];
+      expect(executeMutationMatches.length).toBe(1);
+      expect(appTransactionMatches.length).toBe(1);
+
+      // 5. No dynamic execution / handlers.set_pixels / dofile / loadstring / os.execute
+      expect(body).not.toMatch(/handlers\./);
+      expect(body).not.toMatch(/handlers\[/);
+      expect(body).not.toMatch(/loadstring/);
+      expect(body).not.toMatch(/dofile/);
+      expect(body).not.toMatch(/os\.execute/);
+
+      // 6. Cache by layer object and deterministic application via ipairs
+      expect(body).toMatch(/celCache\[layer\]/);
+      expect(body).toMatch(/ipairs\(celCacheList\)/);
+      expect(body).not.toMatch(/\bpairs\s*\(\s*celCache\s*\)/);
+      expect(body).not.toMatch(/\bpairs\s*\(\s*celCacheList\s*\)/);
+
+      // 7. Validation, planning, and no-op check happen strictly BEFORE executeMcpMutation
+      const mutationIdx = body.indexOf("executeMcpMutation");
+      const denseValidationIdx = body.indexOf("isDenseArray");
+      const payloadLimitIdx = body.indexOf("4 * 1024 * 1024");
+      const opLimitIdx = body.indexOf("64");
+      const pixelLimitIdx = body.indexOf("100000");
+      const boundsCheckIdx = body.indexOf("out of canvas bounds");
+      const colorCheckIdx = body.indexOf("encodeColorToPixel");
+      const ambiguityCheckIdx = body.indexOf("ambiguous semantics");
+      const noOpCheckIdx = body.indexOf("if not hasRealChange then");
+
+      expect(mutationIdx).toBeGreaterThan(-1);
+      expect(denseValidationIdx).toBeGreaterThan(-1);
+      expect(payloadLimitIdx).toBeGreaterThan(-1);
+      expect(opLimitIdx).toBeGreaterThan(-1);
+      expect(pixelLimitIdx).toBeGreaterThan(-1);
+      expect(boundsCheckIdx).toBeGreaterThan(-1);
+      expect(colorCheckIdx).toBeGreaterThan(-1);
+      expect(ambiguityCheckIdx).toBeGreaterThan(-1);
+      expect(noOpCheckIdx).toBeGreaterThan(-1);
+
+      expect(denseValidationIdx).toBeLessThan(mutationIdx);
+      expect(payloadLimitIdx).toBeLessThan(mutationIdx);
+      expect(opLimitIdx).toBeLessThan(mutationIdx);
+      expect(pixelLimitIdx).toBeLessThan(mutationIdx);
+      expect(boundsCheckIdx).toBeLessThan(mutationIdx);
+      expect(colorCheckIdx).toBeLessThan(mutationIdx);
+      expect(ambiguityCheckIdx).toBeLessThan(mutationIdx);
+      expect(noOpCheckIdx).toBeLessThan(mutationIdx);
     });
   });
 });

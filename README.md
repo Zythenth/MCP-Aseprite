@@ -259,7 +259,7 @@ No Windows via PowerShell:
 
 ## Resumo das Ferramentas MCP
 
-O conjunto completo contém **95 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
+O conjunto completo contém **114 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
 
 ### Inspeção Visual e Leitura
 - `aseprite_status`: Estado da conexão, arquivo ativo, tamanho do canvas, camada e frame selecionados e revisão atual.
@@ -285,7 +285,7 @@ O conjunto completo contém **95 ferramentas únicas**. Para reduzir o contexto 
 
 ### Frames, tags e inspeção de animação
 
-- Frames/tags: `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `delete_frame`, `set_frame_duration`, `create_tag`, `list_tags`.
+- Frames/tags: `list_frames`, `select_frame`, `create_frame`, `duplicate_frame`, `move_frame`, `delete_frame`, `set_frame_duration`, `set_frame_durations`, `create_tag`, `list_tags`, `update_tag`, `delete_tag`.
 - Revisão: `get_onion_skin`, `get_filmstrip`, `compare_frames`, `inspect_animation`, `render_animation_preview`.
 - `inspect_animation` combina frames, durações, tags, repetição, ordem efetiva de playback, camadas e cobertura de cels em uma resposta estruturada.
 - `render_animation_preview` retorna primeiro um GIF reproduzível e depois um contact sheet PNG na mesma ordem temporal, com `previewId`, timing, FPS médio e revisão observada.
@@ -293,7 +293,7 @@ O conjunto completo contém **95 ferramentas únicas**. Para reduzir o contexto 
 
 ### Cels, slices e seleções
 
-- Cels: `get_cel`, `create_cel`, `delete_cel`, `set_cel_position`, `set_cel_opacity`, `link_cel`, `unlink_cel`.
+- Cels: `get_cel`, `create_cel`, `copy_cel`, `move_cel`, `delete_cel`, `set_cel_position`, `set_cel_opacity`, `link_cel`, `unlink_cel`. Por segurança, `move_cel` move o cel entre frames da mesma camada; para copiar entre camadas, use `copy_cel`.
 - Slices: `list_slices`, `get_slice`, `create_slice`, `update_slice`, `delete_slice`, incluindo centro nine-patch e pivô.
 - Seleção persistente: `get_selection`, `set_selection`, `clear_selection`, `invert_selection`. `set_selection` oferece substituição, união, subtração e interseção retangulares.
 
@@ -309,14 +309,21 @@ O conjunto completo contém **95 ferramentas únicas**. Para reduzir o contexto 
 - `create_review_checkpoint`, `list_review_checkpoints`, `compare_review_checkpoint`, `delete_review_checkpoint`.
 - `add_lint_waiver`, `list_lint_waivers`, `delete_lint_waiver`. Checkpoints e waivers são vinculados à sessão atual e mantidos apenas em memória.
 
+### Workflow de animação e edição atômica
+
+- `batch_animation_edits` valida antecipadamente uma lista fechada de operações de pixels, posição/opacidade de cel e duração; uma execução efetiva forma uma única transação de Undo e respeita limites de payload, operações, frames e pixels.
+- O workflow estruturado registra a referência carregada e sua análise, plano e key poses, preview da revisão atual, revisão das poses, autoavaliação nas 22 categorias e QA independente (`reviewerId` diferente de `authorId`).
+- `analyze_animation_temporal` produz achados temporais determinísticos e limitados, com hash da seleção/revisão analisada.
+- Qualquer mutação invalida previews e revisões anteriores. Achados críticos abertos, achados altos não tratados, QA ausente/reprovada ou evidência obsoleta impedem a conclusão.
+
 ### Arquivos e exportação
 
 - `find_reference_images`: localiza PNG, JPEG e WebP por nome somente em diretórios autorizados, com busca recursiva limitada.
 - `load_reference_image`: retorna a imagem de referência, dimensões, formato, transparência, hash e análise de paleta sem trocar o sprite ativo.
 - `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `save_project`, `export_png`, `resize_canvas`.
 - `export_sprite_sheet`: exporta por tag ou intervalo explícito, filtra camadas e organiza frames horizontalmente, verticalmente ou em grade, respeitando direção da tag, escala, espaçamento e no-clobber.
-- `export_animation`: exporta a ordem efetiva de uma tag ou intervalo como GIF, spritesheet, sequência PNG ou PNG único. A sequência PNG usa nomes determinísticos e remove arquivos novos já escritos se uma execução no-clobber falhar parcialmente.
-- APNG é rejeitado com mensagem explícita porque o bridge/Aseprite atual não oferece esse encoder; nenhum PNG estático é apresentado falsamente como APNG.
+- `export_animation`: exporta a ordem efetiva de uma tag ou intervalo como GIF, spritesheet, sequência PNG ou PNG único. A sequência PNG usa nomes determinísticos e remove arquivos novos já escritos se uma execução no-clobber falhar parcialmente. Com `final: true`, o gate é aplicado quando o workflow ativo exige conclusão estrita ou quando `strictWorkflowValidation: true`; o resultado aceito inclui evidência compacta vinculada à revisão, preview, revisão das poses, autoavaliação e QA atuais.
+- APNG é rejeitado antes de qualquer comando ao bridge; nenhum PNG estático é apresentado falsamente como APNG. A decisão é intencional: a [documentação oficial de exportação](https://www.aseprite.org/docs/exporting/), a [CLI oficial](https://www.aseprite.org/docs/cli/) e o [registro atual de formatos do Aseprite](https://github.com/aseprite/aseprite/blob/main/src/app/file/file_formats_manager.cpp) não expõem um encoder APNG. Adicionar um encoder Node de terceiros ampliaria a superfície de dependências e manutenção sem suporte nativo verificável; a interface mantém `apng` apenas para retornar uma incompatibilidade explícita e estável.
 
 Ferramentas destrutivas exigem `confirm: true`; gravações em caminho existente exigem `overwrite: true`. Mutações com `returnPreview: true` retornam a imagem como conteúdo MCP sem repetir o base64 no bloco textual.
 
@@ -326,7 +333,7 @@ Ferramentas destrutivas exigem `confirm: true`; gravações em caminho existente
 
 - Testes unitários, de contrato, integração e E2E executados pelo Vitest; a configuração falha se uma seleção de testes não encontrar casos.
 - O mock cobre o protocolo, recuperação incremental e as estruturas expostas pelas ferramentas.
-- `test/real/aseprite-api-smoke.lua` valida contratos críticos dentro de um processo Aseprite real.
+- `test/real/aseprite-api-smoke.lua` valida contratos críticos dentro de um processo Aseprite real, incluindo as APIs usadas por cópia/movimentação de cels, reordenação e duração de frames, atualização/exclusão de tags e Undo/Redo atômico.
 - O workflow de CI executa Node.js 18/20/22 e os sistemas Linux, Windows e macOS; um job separado compila a versão do Aseprite fixada no workflow e roda o smoke test real.
 - O smoke local real depende de um executável Aseprite disponível; os testes headless do Node não substituem essa validação da API Lua.
 
