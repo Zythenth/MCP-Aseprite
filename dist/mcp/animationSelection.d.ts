@@ -11,6 +11,35 @@ export interface AnimationTagSummary {
     direction: AnimationDirection;
     repeats: number;
 }
+export interface AnimationCelSummary {
+    frameNumber: number;
+    x: number;
+    y: number;
+    bounds?: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    };
+    position?: {
+        x: number;
+        y: number;
+    };
+}
+export interface AnimationLayerInspection {
+    uuid?: string;
+    name: string;
+    path: string;
+    isVisible: boolean;
+    opacity: number;
+    isGroup: boolean;
+    isImage: boolean;
+    isTilemap: boolean;
+    celCount: number;
+    celFrames: number[];
+    cels?: AnimationCelSummary[];
+    children?: AnimationLayerInspection[];
+}
 export interface AnimationInspection {
     success?: boolean;
     width: number;
@@ -18,9 +47,10 @@ export interface AnimationInspection {
     colorMode: string;
     frames: AnimationFrameSummary[];
     tags: AnimationTagSummary[];
-    layers: unknown[];
+    layers: AnimationLayerInspection[];
     totalLayers?: number;
     totalCels?: number;
+    totalDurationMs?: number;
     revision?: number;
 }
 export interface AnimationSelectionInput {

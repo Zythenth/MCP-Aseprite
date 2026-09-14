@@ -20,6 +20,9 @@ export const MAX_PIXELS_BATCH = 100000;
 export const MAX_TILESET_PIXELS = 16_777_216;
 export const MAX_BRIDGE_PAYLOAD_BYTES = 16 * 1024 * 1024;
 export const MAX_PENDING_COMMANDS = 128;
+export const MAX_ANIMATION_BATCH_OPERATIONS = 64;
+export const MAX_ANIMATION_BATCH_FRAMES = 64;
+export const MAX_ANIMATION_BATCH_PAYLOAD_BYTES = 4 * 1024 * 1024;
 export const COMPACT_PALETTE_CHARACTERS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 export const COMPACT_TRANSPARENT_CHAR = ".";
 export const SERVER_NAME = "aseprite-mcp";
@@ -170,6 +173,9 @@ export const config = {
     maxTilesetPixels: MAX_TILESET_PIXELS,
     maxBridgePayloadBytes: MAX_BRIDGE_PAYLOAD_BYTES,
     maxPendingCommands: MAX_PENDING_COMMANDS,
+    maxAnimationBatchOperations: MAX_ANIMATION_BATCH_OPERATIONS,
+    maxAnimationBatchFrames: MAX_ANIMATION_BATCH_FRAMES,
+    maxAnimationBatchPayloadBytes: MAX_ANIMATION_BATCH_PAYLOAD_BYTES,
     compactPaletteChars: COMPACT_PALETTE_CHARACTERS,
     compactTransparentChar: COMPACT_TRANSPARENT_CHAR,
     allowedPaths: ALLOWED_PATHS,

@@ -26,6 +26,9 @@ export interface MockCel {
     pixels: Uint32Array;
     opacity?: number;
     imageId?: string;
+    zIndex?: number;
+    color?: string;
+    data?: string;
 }
 export interface MockLayer {
     index: number;
@@ -86,12 +89,26 @@ export interface PixelDelta {
     prevColor: number;
     newColor: number;
 }
+export interface CelSnapshotEntry {
+    key: string;
+    cel: MockCel | null;
+}
+export interface FrameDurationSnapshot {
+    frameNumber: number;
+    duration: number;
+}
 export interface MockTransaction {
     id: string;
     name: string;
     revisionBefore: number;
     revisionAfter: number;
     pixelDeltas: PixelDelta[];
+    batchData?: {
+        celsBefore: CelSnapshotEntry[];
+        celsAfter: CelSnapshotEntry[];
+        frameDurationsBefore: FrameDurationSnapshot[];
+        frameDurationsAfter: FrameDurationSnapshot[];
+    };
 }
 export declare function packRgba(r: number, g: number, b: number, a: number): number;
 export declare function unpackRgba(color: number): {
@@ -126,6 +143,7 @@ export declare class MockAsepriteEngine {
         color?: string;
         direction: "forward" | "reverse" | "pingpong" | "pingpong_reverse";
         repeats: number;
+        data?: string;
     }>;
     slices: MockSlice[];
     selectionPixels: Set<number>;

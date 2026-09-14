@@ -162,7 +162,7 @@ function requireFileStem(value) {
         throw new Error("baseName must not include a file extension.");
     return stem;
 }
-export function registerFileTools(server, dispatcher, stateTracker) {
+export function registerFileTools(server, dispatcher, stateTracker, workflowState) {
     // 1. new_sprite
     server.tool("new_sprite", "Creates a new blank sprite document in Aseprite with specified dimensions and color mode.", {
         width: z.number().int().positive().max(4096).default(32).describe("Canvas width in pixels"),
@@ -533,10 +533,38 @@ export function registerFileTools(server, dispatcher, stateTracker) {
             const projectRoot = resolveProjectRoot(undefined, roots);
             const transparency = alphaSummary(image);
             const palette = analyzeImagePalette(image, params.nearDuplicateThreshold ?? 3);
+            const referenceId = createHash("sha256").update(source).digest("hex");
+            const hash = referenceId;
+            const observedPalette = Array.isArray(palette.colors)
+                ? palette.colors.map((c) => c.hex)
+                : [];
+            const sessionId = typeof stateTracker?.getSessionId === "function" ? stateTracker.getSessionId() : null;
+            const isConnected = typeof stateTracker?.isConnected === "function" ? stateTracker.isConnected() : false;
+            const hasActiveSession = isConnected && Boolean(sessionId && sessionId !== "default");
+            if (hasActiveSession && sessionId && workflowState) {
+                workflowState.registerLoadedReference({
+                    referenceId,
+                    hash,
+                    filePath: canonicalPath,
+                    fileName: path.basename(canonicalPath),
+                    projectRelativePath: isPathWithinRoots(canonicalPath, [projectRoot])
+                        ? path.relative(projectRoot, canonicalPath).replace(/\\/g, "/")
+                        : null,
+                    sourceFormat: extension.slice(1),
+                    dimensions: { width: image.width, height: image.height },
+                    sourceDimensions,
+                    transparency,
+                    observedPalette,
+                    palette,
+                    sessionId,
+                    recordedAt: new Date().toISOString(),
+                });
+            }
             return { content: [
                     { type: "image", data: pngBase64, mimeType: "image/png" },
                     { type: "text", text: JSON.stringify({
-                            referenceId: createHash("sha256").update(source).digest("hex"),
+                            referenceId,
+                            hash,
                             fileName: path.basename(canonicalPath),
                             filePath: canonicalPath,
                             projectRelativePath: isPathWithinRoots(canonicalPath, [projectRoot])
@@ -546,8 +574,11 @@ export function registerFileTools(server, dispatcher, stateTracker) {
                             width: image.width,
                             height: image.height,
                             sourceDimensions,
+                            transparency,
                             ...transparency,
+                            observedPalette,
                             palette,
+                            recordedInWorkflow: hasActiveSession && Boolean(workflowState),
                         }, null, 2) },
                 ] };
         }
@@ -570,10 +601,83 @@ export function registerFileTools(server, dispatcher, stateTracker) {
         columns: z.number().int().min(1).max(64).optional(),
         spacing: z.number().int().min(0).max(64).optional().default(0),
         overwrite: z.boolean().optional().default(false),
+        final: z.boolean().optional().default(false).describe("Whether this export represents final delivery gated by animation workflow completion"),
+        strictWorkflowValidation: z.boolean().optional().default(false).describe("Whether strict workflow validation is enforced"),
     }, async (params) => {
         try {
             if (params.format === "apng") {
                 throw new Error("APNG export is not supported by the current Aseprite bridge. Use GIF or PNG sequence.");
+            }
+            const isFinal = Boolean(params.final);
+            const isStrict = Boolean(params.strictWorkflowValidation);
+            const activeWorkflow = workflowState?.getWorkflow() ?? null;
+            const gateRequired = isFinal && (isStrict || Boolean(activeWorkflow?.strictCompletionRequired));
+            let completionEvidence;
+            if (gateRequired) {
+                if (!workflowState || !activeWorkflow) {
+                    const currentRevision = workflowState ? workflowState.getRevision() : stateTracker.getRevision();
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    success: false,
+                                    code: "WORKFLOW_COMPLETION_REQUIRED",
+                                    error: "Final export requires an active animation workflow and completion verification.",
+                                    currentRevision,
+                                    failedGates: [{ name: "workflowExists", message: "No active animation workflow." }],
+                                    failedGateNames: ["workflowExists"],
+                                    unresolvedCounts: { critical: 0, high: 0, medium: 0, low: 0 },
+                                }, null, 2),
+                            },
+                        ],
+                        isError: true,
+                    };
+                }
+                const validation = workflowState.validateCompletion();
+                if (!validation.isComplete) {
+                    const failedGates = Object.entries(validation.gates)
+                        .filter(([_, g]) => !g.passed)
+                        .map(([name, g]) => ({ name, message: g.message }));
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    success: false,
+                                    code: "WORKFLOW_COMPLETION_REQUIRED",
+                                    error: "Final export blocked: animation workflow completion criteria not met.",
+                                    currentRevision: validation.currentRevision,
+                                    failedGates,
+                                    failedGateNames: failedGates.map((g) => g.name),
+                                    unresolvedCounts: validation.unresolvedFindings,
+                                }, null, 2),
+                            },
+                        ],
+                        isError: true,
+                    };
+                }
+                const evidence = workflowState.getCompletionEvidence();
+                if (!evidence) {
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    success: false,
+                                    code: "WORKFLOW_COMPLETION_REQUIRED",
+                                    error: "Final export blocked: current completion evidence is unavailable.",
+                                    currentRevision: validation.currentRevision,
+                                    failedGates: [{ name: "completionEvidence", message: "Current completion evidence is unavailable." }],
+                                    failedGateNames: ["completionEvidence"],
+                                    unresolvedCounts: validation.unresolvedFindings,
+                                }, null, 2),
+                            },
+                        ],
+                        isError: true,
+                    };
+                }
+                completionEvidence = evidence;
             }
             const capabilities = stateTracker.getCapabilities();
             if (!capabilities.animationInspection) {
@@ -635,6 +739,7 @@ export function registerFileTools(server, dispatcher, stateTracker) {
                                 playback,
                                 scale,
                                 overwrite,
+                                ...(completionEvidence ? { completionEvidence } : {}),
                             }, null, 2) }] };
             }
             if (params.outputDirectory || params.baseName) {
@@ -657,7 +762,12 @@ export function registerFileTools(server, dispatcher, stateTracker) {
                     scale,
                     loop: params.loop ?? playback.loopsContinuously,
                 }, 60_000);
-                return { content: [{ type: "text", text: JSON.stringify({ ...result, format: params.format, playback }, null, 2) }] };
+                return { content: [{ type: "text", text: JSON.stringify({
+                                ...result,
+                                format: params.format,
+                                playback,
+                                ...(completionEvidence ? { completionEvidence } : {}),
+                            }, null, 2) }] };
             }
             const outputPath = validateExportPngPath(params.outputPath, overwrite, roots, true, projectRoot);
             if (params.format === "png") {
@@ -668,7 +778,13 @@ export function registerFileTools(server, dispatcher, stateTracker) {
                     scale,
                     overwrite,
                 }, 15_000);
-                return { content: [{ type: "text", text: JSON.stringify({ ...result, format: params.format, playback, sourceFrame }, null, 2) }] };
+                return { content: [{ type: "text", text: JSON.stringify({
+                                ...result,
+                                format: params.format,
+                                playback,
+                                sourceFrame,
+                                ...(completionEvidence ? { completionEvidence } : {}),
+                            }, null, 2) }] };
             }
             const result = await dispatcher.send("export_sprite_sheet", {
                 outputPath,
@@ -679,7 +795,12 @@ export function registerFileTools(server, dispatcher, stateTracker) {
                 scale,
                 overwrite,
             }, 30_000);
-            return { content: [{ type: "text", text: JSON.stringify({ ...result, format: params.format, playback }, null, 2) }] };
+            return { content: [{ type: "text", text: JSON.stringify({
+                            ...result,
+                            format: params.format,
+                            playback,
+                            ...(completionEvidence ? { completionEvidence } : {}),
+                        }, null, 2) }] };
         }
         catch (error) {
             return { content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };

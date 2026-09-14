@@ -27,6 +27,7 @@ export const PIXEL_ART_WORKFLOW_INSTRUCTIONS = `You are operating Aseprite throu
 - Keep anatomy, volume, palette, light, camera, ground contact, and a stable visual origin consistent across frames. Make subpixel motion by changing clusters over time, never by introducing blurred or partially interpolated pixels.
 - Use onion-skin/reference frames conceptually, compare adjacent frames, preview at actual playback speed, and inspect the loop boundary. Adjust frame durations deliberately; more frames are not automatically smoother or better.
 - Tag distinct animation ranges and avoid changing shared layers or frames in ways that unintentionally affect another animation.
+- When working with animation workflows, independent QA must be delegated by the client when agents are present (requiring an independent reviewer with reviewerId != authorId and independenceConfirmed: true).
 
 5. TILE AND TILESET PRACTICE
 - Match the required tile grid, perspective, texel density, palette, light direction, and collision/readability needs. Test tiles repeated on both axes, including all four corners, and repair every seam.

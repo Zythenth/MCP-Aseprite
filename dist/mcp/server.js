@@ -16,9 +16,12 @@ import { registerSliceTools } from "./tools/slices.js";
 import { registerSelectionTools } from "./tools/selection.js";
 import { registerTileTools } from "./tools/tiles.js";
 import { registerAnimationInspectionTools } from "./tools/animation.js";
+import { registerBatchTools } from "./tools/batch.js";
+import { registerWorkflowTools } from "./tools/workflow.js";
 import { registerPixelArtTools } from "./tools/pixelArt.js";
 import { registerReviewTools } from "./tools/review.js";
 import { ReviewState } from "./reviewState.js";
+import { AnimationWorkflowState } from "./animationWorkflowState.js";
 import { createPolicyToolRegistrar } from "./toolPolicy.js";
 import { registerMcpResources } from "./resources/index.js";
 import { PIXEL_ART_WORKFLOW_INSTRUCTIONS } from "./instructions.js";
@@ -28,6 +31,7 @@ export function createMcpServer(dispatcher, stateTracker, options = {}) {
     const activeDispatcher = dispatcher || new CommandDispatcher();
     const activeStateTracker = stateTracker || new BridgeState();
     const reviewState = new ReviewState();
+    const workflowState = new AnimationWorkflowState(activeStateTracker);
     const readOnly = options.readOnly ?? config.readOnly;
     const enabledToolsets = new Set(options.toolsets ?? [...config.toolsets]);
     const server = new McpServer({
@@ -48,7 +52,7 @@ export function createMcpServer(dispatcher, stateTracker, options = {}) {
     if (enabledToolsets.has("editing"))
         registerEditingTools(toolRegistrar, activeDispatcher, activeStateTracker);
     if (enabledToolsets.has("files"))
-        registerFileTools(toolRegistrar, activeDispatcher, activeStateTracker);
+        registerFileTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
     if (enabledToolsets.has("shapes"))
         registerShapeTools(toolRegistrar, activeDispatcher, activeStateTracker);
     if (enabledToolsets.has("layers"))
@@ -65,8 +69,11 @@ export function createMcpServer(dispatcher, stateTracker, options = {}) {
         registerSelectionTools(toolRegistrar, activeDispatcher, activeStateTracker);
     if (enabledToolsets.has("tiles"))
         registerTileTools(toolRegistrar, activeDispatcher, activeStateTracker);
-    if (enabledToolsets.has("animation"))
-        registerAnimationInspectionTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    if (enabledToolsets.has("animation")) {
+        registerAnimationInspectionTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
+        registerBatchTools(toolRegistrar, activeDispatcher, activeStateTracker);
+        registerWorkflowTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
+    }
     if (enabledToolsets.has("pixel-art"))
         registerPixelArtTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);
     if (enabledToolsets.has("review"))

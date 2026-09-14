@@ -69,10 +69,12 @@ export class MockClient {
                         token: this.token,
                         capabilities: {
                             mock: true,
+                            animationBatch: true,
                             changeJournal: true,
                             animationGif: true,
                             animationInspection: true,
                             referenceImageDecode: true,
+                            timelineEditing: true,
                         },
                     },
                 };
