@@ -226,6 +226,20 @@ No arquivo de configuração do seu cliente MCP (por exemplo, `gemini-mcp-config
 }
 ```
 
+### Skill de projeto para Gemini/Antigravity
+
+O repositório inclui a skill `aseprite` em `.agents/skills/aseprite/SKILL.md`. O Antigravity descobre automaticamente skills de workspace versionadas quando o projeto é aberto pela raiz, permitindo que todas as pessoas que clonarem o repositório usem o mesmo fluxo seguro de criação, revisão e salvamento.
+
+Depois de conectar o servidor MCP `aseprite`, atualize as customizações ou reinicie o Antigravity e inicie o pedido com:
+
+```text
+/aseprite
+
+Crie uma animação no Aseprite usando exclusivamente as ferramentas aseprite/.
+```
+
+A skill proíbe o uso de Python, terminal e scripts auxiliares para gerar pixels, exige edição por coordenadas explícitas, preview, análise temporal, revisão e verificação dos arquivos finais. Ela complementa as instruções enviadas automaticamente pelo próprio servidor MCP.
+
 ---
 
 ## Execução Manual e Scripts
