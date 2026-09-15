@@ -3,7 +3,7 @@ import { z } from "zod";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
 import { MAX_PIXELS_BATCH } from "../../config.js";
-import { decodePngBase64Sync } from "../../image/png.js";
+import { decodeBridgeCanvas } from "../../image/bridgeCanvas.js";
 import {
   analyzeImagePalette,
   deltaE2000,
@@ -26,8 +26,7 @@ async function fetchCanvas(
     layerName: params.layerName,
   }, 10_000);
   if (typeof result.revision === "number") state.setRevision(result.revision);
-  if (typeof result.pngBase64 !== "string") throw new Error("Aseprite bridge did not return canvas PNG data.");
-  return { image: decodePngBase64Sync(result.pngBase64), revision: result.revision, frameNumber: result.frameNumber };
+  return { image: decodeBridgeCanvas(result), revision: result.revision, frameNumber: result.frameNumber };
 }
 
 export function registerPixelArtTools(

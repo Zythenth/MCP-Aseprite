@@ -4,6 +4,7 @@ import { z } from "zod";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
 import { decodePngBase64Sync, encodeRgbaToPngBase64 } from "../../image/png.js";
+import { bridgePreviewPngBase64 } from "../../image/bridgeCanvas.js";
 import { scaleNearestNeighbor } from "../../image/scaling.js";
 import { MAX_PIXELS_BATCH } from "../../config.js";
 import { bridgeToolError, bridgeToolResult } from "./common.js";
@@ -41,8 +42,9 @@ export function registerEditingTools(
         const content: any[] = [];
 
         // If preview was requested and returned
-        if (params.returnPreview && res.pngBase64) {
-          let previewData = res.pngBase64;
+        const returnedPreview = params.returnPreview ? bridgePreviewPngBase64(res) : undefined;
+        if (returnedPreview) {
+          let previewData = returnedPreview;
           const scale = params.previewScale ?? 1;
           if (scale > 1) {
             const img = decodePngBase64Sync(previewData);
@@ -98,10 +100,11 @@ export function registerEditingTools(
         }
 
         const content: any[] = [];
-        if (params.returnPreview && res.pngBase64) {
+        const returnedPreview = params.returnPreview ? bridgePreviewPngBase64(res) : undefined;
+        if (returnedPreview) {
           content.push({
             type: "image" as const,
-            data: res.pngBase64,
+            data: returnedPreview,
             mimeType: "image/png",
           });
         }
@@ -150,10 +153,11 @@ export function registerEditingTools(
         }
 
         const content: any[] = [];
-        if (params.returnPreview && res.pngBase64) {
+        const returnedPreview = params.returnPreview ? bridgePreviewPngBase64(res) : undefined;
+        if (returnedPreview) {
           content.push({
             type: "image" as const,
-            data: res.pngBase64,
+            data: returnedPreview,
             mimeType: "image/png",
           });
         }

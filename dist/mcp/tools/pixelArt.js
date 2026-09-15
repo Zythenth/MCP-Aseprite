@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { MAX_PIXELS_BATCH } from "../../config.js";
-import { decodePngBase64Sync } from "../../image/png.js";
+import { decodeBridgeCanvas } from "../../image/bridgeCanvas.js";
 import { analyzeImagePalette, deltaE2000, generateDitherPixels, generatePaletteRamp, lintPixelArt, parseHexColor, rgbToLab, } from "../../image/pixelArt.js";
 import { bridgeToolError, bridgeToolResult } from "./common.js";
 async function fetchCanvas(dispatcher, state, params) {
@@ -10,9 +10,7 @@ async function fetchCanvas(dispatcher, state, params) {
     }, 10_000);
     if (typeof result.revision === "number")
         state.setRevision(result.revision);
-    if (typeof result.pngBase64 !== "string")
-        throw new Error("Aseprite bridge did not return canvas PNG data.");
-    return { image: decodePngBase64Sync(result.pngBase64), revision: result.revision, frameNumber: result.frameNumber };
+    return { image: decodeBridgeCanvas(result), revision: result.revision, frameNumber: result.frameNumber };
 }
 export function registerPixelArtTools(server, dispatcher, state, reviews) {
     server.tool("lint_pixel_art", "Runs deterministic pixel-art checks for orphan pixels, one-pixel gaps, banding, possible pillow shading, symmetry drift, and tile seams. Heuristic findings include confidence and are never applied automatically.", {

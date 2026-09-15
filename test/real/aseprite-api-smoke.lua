@@ -10,6 +10,8 @@ local sprite = Sprite(8, 8, ColorMode.RGB)
 app.sprite = sprite
 local base = sprite.layers[1]
 base.name = "Base"
+local editableOk, editableValue = pcall(function() return base.isEditable end)
+check(editableOk and editableValue ~= false, "Layer.isEditable contract failed")
 
 local frame2 = sprite:newEmptyFrame(2)
 local image = Image(4, 4, ColorMode.RGB)
@@ -223,6 +225,9 @@ check(loadedReference and loadedReference.width == sprite.width and loadedRefere
 os.remove(referenceOutput)
 
 local gifOutput = output .. ".gif"
+local originalSprite = sprite
+local originalFrame = sprite.frames[1]
+local originalLayer = base
 local preview = Sprite(sprite.width, sprite.height, ColorMode.RGB)
 local previewLayer = preview.layers[1]
 for sequenceIndex, sourceFrameNumber in ipairs({ 1, 2, 1 }) do
@@ -235,12 +240,24 @@ for sequenceIndex, sourceFrameNumber in ipairs({ 1, 2, 1 }) do
   else preview:newCel(previewLayer, targetFrame, flattened, Point(0, 0)) end
   targetFrame.duration = sprite.frames[sourceFrameNumber].duration
 end
-local previewTag = preview:newTag(1, #preview.frames)
-previewTag.repeats = 0
-preview:saveAs(gifOutput)
+local gifPreferences = app.preferences.gif
+local originalGifShowAlert = gifPreferences.show_alert
+local originalGifLoop = gifPreferences.loop
+gifPreferences.show_alert = false
+gifPreferences.loop = true
+local gifSaved, gifSaveError = pcall(function() preview:saveAs(gifOutput) end)
+gifPreferences.show_alert = originalGifShowAlert
+gifPreferences.loop = originalGifLoop
+check(gifSaved, "real Aseprite GIF save failed: " .. tostring(gifSaveError))
 check(app.fs.isFile(gifOutput), "real Aseprite did not write the animation GIF")
 preview:close()
-app.sprite = sprite
+app.sprite = originalSprite
+app.frame = originalFrame
+app.layer = originalLayer
+check(app.sprite == originalSprite and app.frame == originalFrame and app.layer == originalLayer,
+  "animation preview did not restore the original sprite/frame/layer")
+check(gifPreferences.show_alert == originalGifShowAlert and gifPreferences.loop == originalGifLoop,
+  "animation preview did not restore GIF preferences")
 os.remove(gifOutput)
 print("ASEPRITE_REAL_SMOKE_OK " .. tostring(app.version) .. " api=" .. tostring(app.apiVersion))
 sprite:close()

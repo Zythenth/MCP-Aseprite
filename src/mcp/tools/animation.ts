@@ -4,7 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
 import { composeFilmstrip, composeOnionSkin, compareFrames } from "../../image/animation.js";
-import { decodePngBase64Sync, encodeRgbaToPngBase64, type ImageBuffer } from "../../image/png.js";
+import { encodeRgbaToPngBase64, type ImageBuffer } from "../../image/png.js";
+import { decodeBridgeCanvas } from "../../image/bridgeCanvas.js";
 import { scaleNearestNeighbor } from "../../image/scaling.js";
 import {
   computeCanonicalTemporalHash,
@@ -57,8 +58,11 @@ async function fetchFrame(
 ): Promise<ImageBuffer> {
   const result = await dispatcher.send<any>("get_canvas", { frameIndex: frameNumber }, 10_000);
   if (typeof result.revision === "number") state.setRevision(result.revision);
-  if (typeof result.pngBase64 !== "string") throw new Error(`Frame ${frameNumber} did not return PNG data.`);
-  return decodePngBase64Sync(result.pngBase64);
+  try {
+    return decodeBridgeCanvas(result);
+  } catch (error) {
+    throw new Error(`Frame ${frameNumber} did not return valid canvas data: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 async function getFrameContext(dispatcher: CommandDispatcher, state: BridgeState): Promise<{
@@ -128,10 +132,18 @@ async function fetchPlaybackFrames(
 function animationSelectionSchema(): Record<string, z.ZodTypeAny> {
   return {
     tagName: z.string().min(1).max(128).optional().describe("Exact animation tag name"),
+    tag: z.string().min(1).max(128).optional().describe("Alias for tagName; do not provide both"),
     fromFrame: z.number().int().positive().optional(),
     toFrame: z.number().int().positive().optional(),
     direction: animationDirectionSchema.optional().describe("Optional playback-direction override"),
   };
+}
+
+function normalizeAnimationSelection<T extends { tagName?: string; tag?: string }>(params: T): T & { tagName?: string } {
+  if (params.tagName && params.tag && params.tagName !== params.tag) {
+    throw new Error("tag and tagName must match when both are provided.");
+  }
+  return { ...params, tagName: params.tagName ?? params.tag };
 }
 
 export function registerAnimationInspectionTools(
@@ -144,10 +156,10 @@ export function registerAnimationInspectionTools(
     "inspect_animation",
     "Returns structured temporal metadata for the full sprite and a selected tag or frame range, including timing, playback order, loops, layers, and cel coverage.",
     animationSelectionSchema(),
-    async (params: { tagName?: string; fromFrame?: number; toFrame?: number; direction?: AnimationDirection }) => {
+    async (params: { tagName?: string; tag?: string; fromFrame?: number; toFrame?: number; direction?: AnimationDirection }) => {
       try {
         const inspection = await fetchAnimationInspection(dispatcher, state);
-        const playback = resolveAnimationPlayback(inspection, params);
+        const playback = resolveAnimationPlayback(inspection, normalizeAnimationSelection(params));
         return { content: [{ type: "text" as const, text: JSON.stringify({
           success: true,
           width: inspection.width,
@@ -174,17 +186,18 @@ export function registerAnimationInspectionTools(
 
   server.tool(
     "render_animation_preview",
-    "Returns a playable GIF plus a PNG contact sheet for mandatory temporal and structural review of a tag or frame range.",
+    "Returns a playable GIF plus a PNG contact sheet for mandatory temporal and structural review of a tag or frame range. Preview scaling affects only the returned media and never the source canvas; do not call resize_canvas to match preview dimensions.",
     {
       ...animationSelectionSchema(),
       loop: z.boolean().optional().describe("Override continuous looping; defaults to the selected tag repeat setting"),
-      scale: z.number().int().min(1).max(8).optional().default(2).describe("Nearest-neighbor GIF scale"),
+      scale: z.number().int().min(1).max(8).optional().default(2).describe("Nearest-neighbor output scale; never changes the source canvas"),
       filmstripScale: z.number().int().min(1).max(8).optional().default(2),
       columns: z.number().int().min(1).max(16).optional().default(8),
       gap: z.number().int().min(0).max(8).optional().default(1),
     },
     async (params: {
       tagName?: string;
+      tag?: string;
       fromFrame?: number;
       toFrame?: number;
       direction?: AnimationDirection;
@@ -197,7 +210,7 @@ export function registerAnimationInspectionTools(
       try {
         requireAnimationCapability(state, "animationGif");
         const inspection = await fetchAnimationInspection(dispatcher, state);
-        const playback = resolveAnimationPlayback(inspection, params);
+        const playback = resolveAnimationPlayback(inspection, normalizeAnimationSelection(params));
         if (playback.frameNumbers.length > MAX_FILMSTRIP_FRAMES) {
           throw new Error(`Animation preview is limited to ${MAX_FILMSTRIP_FRAMES} playback frames.`);
         }
@@ -317,6 +330,7 @@ export function registerAnimationInspectionTools(
     },
     async (params: {
       tagName?: string;
+      tag?: string;
       fromFrame?: number;
       toFrame?: number;
       direction?: AnimationDirection;
@@ -337,7 +351,7 @@ export function registerAnimationInspectionTools(
     }) => {
       try {
         const inspection = await fetchAnimationInspection(dispatcher, state);
-        const playback = resolveAnimationPlayback(inspection, params);
+        const playback = resolveAnimationPlayback(inspection, normalizeAnimationSelection(params));
         if (playback.frameNumbers.length > MAX_ANALYSIS_FRAMES) {
           throw new Error(`Animation temporal analysis is limited to ${MAX_ANALYSIS_FRAMES} playback frames.`);
         }

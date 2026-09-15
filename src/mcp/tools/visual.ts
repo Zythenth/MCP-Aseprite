@@ -3,10 +3,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
-import { decodePngBase64Sync, encodeRgbaToPngBase64 } from "../../image/png.js";
+import { encodeRgbaToPngBase64 } from "../../image/png.js";
 import { scaleNearestNeighbor } from "../../image/scaling.js";
 import { applyCheckerboardBackdrop } from "../../image/checkerboard.js";
 import { generatePixelGridPreview } from "../../image/preview.js";
+import { bridgeCanvasPngBase64, decodeBridgeCanvas } from "../../image/bridgeCanvas.js";
 
 export function applyLegacyRegionFallback(
   res: any,
@@ -133,12 +134,12 @@ export function registerVisualTools(
           stateTracker.setRevision(res.revision);
         }
 
-        let pngBase64 = res.pngBase64;
+        let pngBase64 = bridgeCanvasPngBase64(res);
         const scale = params.scale ?? 1;
         const useCheckerboard = params.checkerboard ?? false;
 
-        if ((scale > 1 || useCheckerboard) && pngBase64) {
-          const img = decodePngBase64Sync(pngBase64);
+        if (scale > 1 || useCheckerboard) {
+          const img = decodeBridgeCanvas(res);
           let rawData = img.data;
           if (useCheckerboard) {
             rawData = applyCheckerboardBackdrop(rawData, img.width, img.height);
@@ -243,10 +244,10 @@ export function registerVisualTools(
           stateTracker.setRevision(res.revision);
         }
 
-        let pngBase64 = res.pngBase64;
+        let pngBase64 = bridgeCanvasPngBase64(res);
         const scale = params.scale ?? 4;
-        if (scale > 1 && pngBase64) {
-          const img = decodePngBase64Sync(pngBase64);
+        if (scale > 1) {
+          const img = decodeBridgeCanvas(res);
           const scaled = scaleNearestNeighbor(img.data, img.width, img.height, scale);
           pngBase64 = encodeRgbaToPngBase64(scaled.data, scaled.width, scaled.height).base64;
         }
@@ -313,7 +314,7 @@ export function registerVisualTools(
           stateTracker.setRevision(canvasRes.revision);
         }
 
-        const img = decodePngBase64Sync(canvasRes.pngBase64);
+        const img = decodeBridgeCanvas(canvasRes);
         const preview = generatePixelGridPreview(img.data, img.width, img.height, {
           scale: params.scale,
           showGrid: params.showGrid,

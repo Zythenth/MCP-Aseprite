@@ -654,9 +654,9 @@ local function base64Encode(data)
 end
 
 -- ------------------------------------------------------------------------------
--- Helper: Render Composite Frame to Base64 PNG
+-- Helper: Render Composite Frame in Memory
 -- ------------------------------------------------------------------------------
-local function exportFramePngBase64(sprite, frameNumber, targetLayer)
+local function renderFrameImage(sprite, frameNumber, targetLayer)
   frameNumber = frameNumber or (app.frame and app.frame.frameNumber) or 1
   local compImg = Image(sprite.spec)
   local transPixel = getTransparentPixel(sprite)
@@ -673,27 +673,30 @@ local function exportFramePngBase64(sprite, frameNumber, targetLayer)
     compImg:drawSprite(sprite, frameNumber, Point(0, 0))
   end
 
-  local tempFileName = string.format("ase_mcp_%d_%d.png", os.time(), math.random(1000, 9999))
-  local tempPath = app.fs.joinPath(app.fs.tempPath, tempFileName)
+  return compImg
+end
 
-  if sprite.colorMode == ColorMode.INDEXED then
-    local pal = (sprite.palettes and sprite.palettes[1])
-    if pal then
-      compImg:saveAs{ filename = tempPath, palette = pal }
-    else
-      compImg:saveAs(tempPath)
+local function imageRgbaBase64(image, sprite)
+  local pixels = {}
+  local index = 1
+  for y = 0, image.height - 1 do
+    for x = 0, image.width - 1 do
+      local rgba = decodePixelToRgba(sprite, image:getPixel(x, y))
+      pixels[index] = string.char(rgba.r, rgba.g, rgba.b, rgba.a)
+      index = index + 1
     end
-  else
-    compImg:saveAs(tempPath)
   end
+  return base64Encode(table.concat(pixels))
+end
 
-  local f = io.open(tempPath, "rb")
-  if not f then return "" end
-  local bytes = f:read("*all")
-  f:close()
-  os.remove(tempPath)
-
-  return base64Encode(bytes)
+local function attachFramePreview(result, sprite, frameNumber, targetLayer)
+  local compImg = renderFrameImage(sprite, frameNumber, targetLayer)
+  result.preview = {
+    width = compImg.width,
+    height = compImg.height,
+    rgbaBase64 = imageRgbaBase64(compImg, sprite)
+  }
+  return result
 end
 
 local function exportImagePngBase64(image, sprite)
@@ -743,6 +746,19 @@ local function renderAnimationGif(params)
   local originalFrameNumber = app.frame and app.frame.frameNumber or 1
   local originalLayer = app.layer
   local previewSprite = nil
+  local function closePreviewAndRestoreSource()
+    if previewSprite then
+      local closed = pcall(function() previewSprite:close() end)
+      if closed then previewSprite = nil end
+    end
+    if sourceSprite then
+      pcall(function()
+        app.sprite = sourceSprite
+        app.frame = sourceSprite.frames[math.min(originalFrameNumber, #sourceSprite.frames)]
+        if originalLayer then app.layer = originalLayer end
+      end)
+    end
+  end
   local ok, resultOrError = pcall(function()
     previewSprite = Sprite(outputWidth, outputHeight, ColorMode.RGB)
     local previewLayer = previewSprite.layers[1]
@@ -780,15 +796,26 @@ local function renderAnimationGif(params)
       totalDurationMs = totalDurationMs + durationMs
     end
 
-    local previewTag = previewSprite:newTag(1, #previewSprite.frames)
-    previewTag.name = params.tagName or "MCP Preview"
-    previewTag.aniDir = AniDir.FORWARD
-    previewTag.repeats = params.loop == true and 0 or 1
     if not temporary and params.overwrite ~= true then
       local existing = io.open(outputPath, "rb")
       if existing then existing:close(); error("File appeared before export and overwrite is false: " .. tostring(outputPath)) end
     end
-    previewSprite:saveAs(outputPath)
+    -- Sprite:saveAs() always enters the GIF format-options path in GUI builds,
+    -- even though the script API requests useUI=false. Suppress that dialog
+    -- only for this save and restore the user's preferences immediately.
+    -- A temporary tag is intentionally not created because GIF cannot store
+    -- tags and Aseprite would otherwise show a separate compatibility alert.
+    local gifPreferences = app.preferences.gif
+    local originalGifShowAlert = gifPreferences.show_alert
+    local originalGifLoop = gifPreferences.loop
+    gifPreferences.show_alert = false
+    gifPreferences.loop = params.loop == true
+    local saved, saveError = pcall(function() previewSprite:saveAs(outputPath) end)
+    pcall(function()
+      gifPreferences.show_alert = originalGifShowAlert
+      gifPreferences.loop = originalGifLoop
+    end)
+    if not saved then error(saveError) end
     if not app.fs.isFile(outputPath) then error("Aseprite did not create the GIF output.") end
 
     local result = {
@@ -802,6 +829,10 @@ local function renderAnimationGif(params)
       scale = scale,
       loop = params.loop == true
     }
+    -- Restore the editor before reading the temporary file. Aseprite can pause
+    -- file reads behind its script-security dialog; the source sprite must
+    -- remain active even while that dialog is awaiting a user decision.
+    closePreviewAndRestoreSource()
     if temporary then
       local file = io.open(outputPath, "rb")
       if not file then error("Failed to read temporary animation GIF.") end
@@ -819,14 +850,7 @@ local function renderAnimationGif(params)
     return result
   end)
 
-  if previewSprite then pcall(function() previewSprite:close() end) end
-  if sourceSprite then
-    pcall(function()
-      app.sprite = sourceSprite
-      app.frame = sourceSprite.frames[math.min(originalFrameNumber, #sourceSprite.frames)]
-      if originalLayer then app.layer = originalLayer end
-    end)
-  end
+  closePreviewAndRestoreSource()
   if temporary then pcall(function() os.remove(outputPath) end) end
   if not ok then error(resultOrError) end
   return resultOrError
@@ -903,7 +927,7 @@ local function finishMutation(params, result, scope, bounds, frameNumber, fullRe
     "mcp_mutation"
   )
   if params and params.returnPreview and spr then
-    result.pngBase64 = exportFramePngBase64(spr, frameNumber)
+    attachFramePreview(result, spr, frameNumber)
   end
   return result
 end
@@ -987,7 +1011,7 @@ local function resolveTargetLayer(spr, params, forWriting)
   end
 
   if forWriting then
-    if targetLayer.isEditable == false or targetLayer.isLocked == true then
+    if targetLayer.isEditable == false then
       error("Cannot paint on locked or non-editable layer.")
     end
   end
@@ -1095,12 +1119,12 @@ handlers.get_canvas = function(params)
     end
   end
 
-  local b64 = exportFramePngBase64(spr, frameNum, targetLayer)
+  local composed = renderFrameImage(spr, frameNum, targetLayer)
   return {
     width = spr.width,
     height = spr.height,
     frameNumber = frameNum,
-    pngBase64 = b64,
+    rgbaBase64 = imageRgbaBase64(composed, spr),
     revision = state.revision
   }
 end
@@ -1201,7 +1225,7 @@ handlers.inspect_sprite = function(params)
   return {
     width = canvasRes.width,
     height = canvasRes.height,
-    pngBase64 = canvasRes.pngBase64,
+    rgbaBase64 = canvasRes.rgbaBase64,
     activeLayer = app.layer and app.layer.name or "",
     activeFrame = app.frame and app.frame.frameNumber or 1,
     pixelGrid = gridRes,
@@ -1276,7 +1300,7 @@ handlers.set_pixels = function(params)
     revision = state.revision
   }
   if params.returnPreview then
-    res.pngBase64 = exportFramePngBase64(spr, targetFrame.frameNumber)
+    attachFramePreview(res, spr, targetFrame.frameNumber)
   end
   return res
 end
@@ -1709,7 +1733,7 @@ handlers.batch_animation_edits = function(params)
     }
     if params and params.returnPreview and spr then
       local previewFrame = (app.frame and app.frame.frameNumber) or 1
-      noChangeResult.pngBase64 = exportFramePngBase64(spr, previewFrame)
+      attachFramePreview(noChangeResult, spr, previewFrame)
     end
     return noChangeResult
   end
@@ -2684,7 +2708,7 @@ handlers.list_layer_tree = function(params)
         stackIndex = layer.stackIndex,
         isVisible = layer.isVisible,
         isEditable = layer.isEditable,
-        isLocked = layer.isLocked,
+        isLocked = layer.isEditable == false,
         opacity = layer.opacity or 255,
         isGroup = layer.isGroup,
         isImage = layer.isImage,
@@ -3883,7 +3907,7 @@ handlers.new_sprite = function(params)
   resetChangeJournal()
   recordChange(state.revision, "sprite", 0, rectToTable(spr.bounds), true, "new_sprite")
   local result = { success = true, width = w, height = h, colorMode = params.colorMode or "rgb", revision = state.revision }
-  if params.returnPreview then result.pngBase64 = exportFramePngBase64(spr, 1) end
+  if params.returnPreview then attachFramePreview(result, spr, 1) end
   return result
 end
 

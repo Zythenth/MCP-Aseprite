@@ -124,6 +124,8 @@ if (Test-Path -LiteralPath $luaSource) {
         Write-Host "  $targetLua" -ForegroundColor White
         Write-Host "  Protocol v$($serverProtocolMatch.Groups['version'].Value), SHA-256 verified." -ForegroundColor Green
         Write-Host "  In Aseprite, open: File -> Scripts -> aseprite-bridge" -ForegroundColor Yellow
+        Write-Host "  On the first file-export security prompt, verify this exact script path," -ForegroundColor Yellow
+        Write-Host "  then select 'Give full trust to this script' to avoid per-file prompts." -ForegroundColor Yellow
     } else {
         Write-Host "Notice: Aseprite directory not found at $appData\Aseprite." -ForegroundColor Gray
         Write-Host "To install the bridge manually, in Aseprite go to: File -> Scripts -> Open Scripts Folder" -ForegroundColor Yellow

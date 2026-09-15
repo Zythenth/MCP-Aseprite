@@ -1,12 +1,14 @@
+import { bridgePreviewPngBase64 } from "../../image/bridgeCanvas.js";
 export function bridgeToolResult(result, stateTracker, returnPreview = false) {
     if (typeof result?.revision === "number")
         stateTracker.setRevision(result.revision);
     const content = [];
-    if (returnPreview && typeof result?.pngBase64 === "string") {
-        content.push({ type: "image", data: result.pngBase64, mimeType: "image/png" });
+    const previewPng = returnPreview ? bridgePreviewPngBase64(result ?? {}) : undefined;
+    if (previewPng) {
+        content.push({ type: "image", data: previewPng, mimeType: "image/png" });
     }
-    const textResult = result && typeof result === "object" && typeof result.pngBase64 === "string"
-        ? { ...result, pngBase64: undefined }
+    const textResult = result && typeof result === "object"
+        ? { ...result, pngBase64: undefined, rgbaBase64: undefined, preview: undefined }
         : result;
     content.push({ type: "text", text: JSON.stringify(textResult, null, 2) });
     return { content };

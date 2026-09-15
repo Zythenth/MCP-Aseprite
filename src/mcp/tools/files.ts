@@ -35,6 +35,13 @@ const MAX_REFERENCE_PIXELS = 16_777_216;
 const MAX_REFERENCE_SCAN_ENTRIES = 10_000;
 const MAX_ANIMATION_EXPORT_FRAMES = 256;
 
+function normalizeTagName(tagName?: string, tag?: string): string | undefined {
+  if (tagName && tag && tagName !== tag) {
+    throw new Error("tag and tagName must match when both are provided.");
+  }
+  return tagName ?? tag;
+}
+
 function validateReferenceDimensions(width: number, height: number): { width: number; height: number } {
   if (
     width < 1 || height < 1
@@ -305,17 +312,22 @@ export function registerFileTools(
       filePath: z.string().optional().describe("Complete .aseprite target path, absolute or relative to ASEPRITE_PROJECT_ROOT"),
       directory: z.string().optional().describe("Target directory, absolute or relative to ASEPRITE_PROJECT_ROOT"),
       fileName: z.string().optional().describe("Exact .aseprite file name; never rewritten"),
+      filename: z.string().optional().describe("Alias for fileName; do not provide both"),
       assetName: z.string().max(120).optional().describe("Asset name used only when fileName is omitted"),
       animationName: z.string().max(120).optional().describe("Animation/action name used only when fileName is omitted"),
       overwrite: z.boolean().optional().default(false),
     },
     async (params) => {
       try {
-        if (params.filePath && (params.directory || params.fileName)) {
+        if (params.fileName && params.filename && params.fileName !== params.filename) {
+          throw new Error("filename and fileName must match when both are provided.");
+        }
+        const exactFileName = params.fileName ?? params.filename;
+        if (params.filePath && (params.directory || exactFileName)) {
           throw new Error("filePath is mutually exclusive with directory/fileName.");
         }
-        if (params.fileName && params.assetName) throw new Error("assetName is only used when fileName is omitted.");
-        if (params.fileName && params.animationName) throw new Error("animationName is only used when fileName is omitted.");
+        if (exactFileName && params.assetName) throw new Error("assetName is only used when fileName is omitted.");
+        if (exactFileName && params.animationName) throw new Error("animationName is only used when fileName is omitted.");
 
         const roots = getAllowedRoots();
         const projectRoot = resolveProjectRoot(undefined, roots);
@@ -326,7 +338,7 @@ export function registerFileTools(
           targetPath = params.filePath;
         } else {
           const directory = validateDirectoryPath(params.directory ?? projectRoot, roots, true, projectRoot);
-          let fileName = params.fileName;
+          let fileName = exactFileName;
           if (fileName) {
             fileName = requireBaseName(fileName);
             if (path.extname(fileName).toLowerCase() !== ".aseprite") {
@@ -444,6 +456,7 @@ export function registerFileTools(
       fromFrame: z.number().int().positive().optional(),
       toFrame: z.number().int().positive().optional(),
       tagName: z.string().optional().describe("Animation tag to export; mutually exclusive with fromFrame/toFrame"),
+      tag: z.string().optional().describe("Alias for tagName; do not provide both"),
       layerNames: z.array(z.string()).min(1).max(64).optional().describe("Optional non-group layers to composite"),
       layout: z.enum(["horizontal", "vertical", "grid"]).optional().default("horizontal"),
       columns: z.number().int().min(1).max(64).optional().describe("Grid columns; required only to override automatic grid layout"),
@@ -453,7 +466,8 @@ export function registerFileTools(
     },
     async (params) => {
       try {
-        if (params.tagName && (params.fromFrame !== undefined || params.toFrame !== undefined)) {
+        const tagName = normalizeTagName(params.tagName, params.tag);
+        if (tagName && (params.fromFrame !== undefined || params.toFrame !== undefined)) {
           throw new Error("tagName is mutually exclusive with fromFrame/toFrame.");
         }
         if ((params.fromFrame === undefined) !== (params.toFrame === undefined)) {
@@ -465,6 +479,8 @@ export function registerFileTools(
         const canonicalPath = validateExportPngPath(params.outputPath, params.overwrite ?? false, undefined, true);
         const result = await dispatcher.send<any>("export_sprite_sheet", {
           ...params,
+          tag: undefined,
+          tagName,
           outputPath: canonicalPath,
           overwrite: params.overwrite ?? false,
         }, 30_000);
@@ -689,6 +705,7 @@ export function registerFileTools(
       outputDirectory: z.string().optional().describe("Existing target directory for png_sequence"),
       baseName: z.string().min(1).max(120).optional().describe("PNG-sequence file stem without extension"),
       tagName: z.string().min(1).max(128).optional(),
+      tag: z.string().min(1).max(128).optional().describe("Alias for tagName; do not provide both"),
       fromFrame: z.number().int().positive().optional(),
       toFrame: z.number().int().positive().optional(),
       direction: z.enum(["forward", "reverse", "pingpong", "pingpong_reverse"]).optional(),
@@ -707,6 +724,7 @@ export function registerFileTools(
       outputDirectory?: string;
       baseName?: string;
       tagName?: string;
+      tag?: string;
       fromFrame?: number;
       toFrame?: number;
       direction?: AnimationDirection;
@@ -720,6 +738,7 @@ export function registerFileTools(
       strictWorkflowValidation?: boolean;
     }) => {
       try {
+        const tagName = normalizeTagName(params.tagName, params.tag);
         if (params.format === "apng") {
           throw new Error("APNG export is not supported by the current Aseprite bridge. Use GIF or PNG sequence.");
         }
@@ -816,7 +835,7 @@ export function registerFileTools(
         }
         const inspection = await dispatcher.send<AnimationInspection>("inspect_animation", {}, 10_000);
         if (typeof inspection.revision === "number") stateTracker.setRevision(inspection.revision);
-        const playback = resolveAnimationPlayback(inspection, params);
+        const playback = resolveAnimationPlayback(inspection, { ...params, tagName });
         if (playback.frameNumbers.length > MAX_ANIMATION_EXPORT_FRAMES) {
           throw new Error(`Animation export is limited to ${MAX_ANIMATION_EXPORT_FRAMES} playback frames.`);
         }

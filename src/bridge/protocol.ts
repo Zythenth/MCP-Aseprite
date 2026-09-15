@@ -212,7 +212,8 @@ export interface BridgeCanvasResult {
   width: number;
   height: number;
   frameNumber: number;
-  pngBase64: string;
+  pngBase64?: string;
+  rgbaBase64?: string;
   revision: number;
 }
 
@@ -229,7 +230,8 @@ export interface BridgePixelGridResult {
 export interface BridgeInspectResult {
   width: number;
   height: number;
-  pngBase64: string;
+  pngBase64?: string;
+  rgbaBase64?: string;
   activeLayer: string;
   activeFrame: number;
   pixelGrid: BridgePixelGridResult;
@@ -241,4 +243,11 @@ export interface BridgeSetPixelsResult {
   bounds: BridgeBounds;
   revision: number;
   pngBase64?: string;
+  rgbaBase64?: string;
+  preview?: {
+    width: number;
+    height: number;
+    pngBase64?: string;
+    rgbaBase64?: string;
+  };
 }

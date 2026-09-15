@@ -119,6 +119,16 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       }
     });
 
+    it("uses the real Aseprite layer editability API without reading a nonexistent isLocked field", () => {
+      const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
+      const luaContent = fs.readFileSync(luaPath, "utf-8");
+
+      expect(luaContent).not.toContain("layer.isLocked");
+      expect(luaContent).not.toContain("targetLayer.isLocked");
+      expect(luaContent).toContain("targetLayer.isEditable == false");
+      expect(luaContent).toContain("isLocked = layer.isEditable == false");
+    });
+
     it("validates that flood_fill in Lua does not use O(n^2) table.remove queue operations", () => {
       const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
       const luaContent = fs.readFileSync(luaPath, "utf-8");
@@ -421,8 +431,8 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
       const luaContent = fs.readFileSync(luaPath, "utf-8");
 
-      // Check exportFramePngBase64 helper
-      const helperMatch = /local\s+function\s+exportFramePngBase64\s*\(([^)]+)\)([\s\S]*?)(?=\nlocal\s+function\s+ensureCanvasSizedCel)/.exec(luaContent);
+      // Check in-memory frame compositor and RGBA serializer
+      const helperMatch = /local\s+function\s+renderFrameImage\s*\(([^)]+)\)([\s\S]*?)(?=\nlocal\s+function\s+imageRgbaBase64)/.exec(luaContent);
       expect(helperMatch).not.toBeNull();
       const helperBody = helperMatch![2];
 
@@ -430,9 +440,22 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(helperBody).toContain("compImg:drawImage");
       expect(helperBody).toContain("cel.position");
       expect(helperBody).toContain("cel.image");
-      expect(helperBody).toContain("ColorMode.INDEXED");
-      expect(helperBody).toContain("palette = pal");
       expect(helperBody).toContain("math.floor(((cel.opacity or 255) * (targetLayer.opacity or 255) + 127) / 255)");
+      expect(helperBody).not.toContain("saveAs");
+      expect(helperBody).not.toContain("io.open");
+
+      const rgbaHelperMatch = /local\s+function\s+imageRgbaBase64\s*\(([^)]+)\)([\s\S]*?)(?=\nlocal\s+function\s+attachFramePreview)/.exec(luaContent);
+      expect(rgbaHelperMatch).not.toBeNull();
+      expect(rgbaHelperMatch![2]).toContain("image:getPixel(x, y)");
+      expect(rgbaHelperMatch![2]).toContain("decodePixelToRgba(sprite");
+      expect(rgbaHelperMatch![2]).toContain("base64Encode(table.concat(pixels))");
+
+      const previewHelperMatch = /local\s+function\s+attachFramePreview\s*\(([^)]+)\)([\s\S]*?)(?=\nlocal\s+function\s+exportImagePngBase64)/.exec(luaContent);
+      expect(previewHelperMatch).not.toBeNull();
+      expect(previewHelperMatch![2]).toContain("rgbaBase64 = imageRgbaBase64(compImg, sprite)");
+      expect(previewHelperMatch![2]).not.toContain("saveAs");
+      expect(previewHelperMatch![2]).not.toContain("io.open");
+      expect(luaContent).not.toContain("exportFramePngBase64");
 
       // Check handlers.get_canvas
       const getCanvasMatch = /handlers\.get_canvas\s*=\s*function\s*\(params\)([\s\S]*?)(?:\n\s*handlers\.|\n\s*--)/.exec(luaContent);
@@ -444,7 +467,11 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(body).toContain("#matched == 0");
       expect(body).toContain("#matched > 1");
       expect(body).toContain("targetLayer.isGroup");
-      expect(body).toContain("exportFramePngBase64(spr, frameNum, targetLayer)");
+      expect(body).toContain("renderFrameImage(spr, frameNum, targetLayer)");
+      expect(body).toContain("rgbaBase64 = imageRgbaBase64(composed, spr)");
+      expect(body).not.toContain("exportFramePngBase64");
+      expect(body).not.toContain("saveAs");
+      expect(body).not.toContain("io.open");
       expect(body).not.toContain("state.revision =");
     });
 
@@ -503,7 +530,12 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(helperBody).toContain("10485760");
       expect(helperBody).toContain("frameImage:drawSprite(sourceSprite, rawFrameNumber");
       expect(helperBody).toContain("targetFrame.duration = sourceFrame.duration");
-      expect(helperBody).toContain("previewTag.repeats = params.loop == true and 0 or 1");
+      expect(helperBody).not.toContain("previewSprite:newTag");
+      expect(helperBody).toContain("app.preferences.gif");
+      expect(helperBody).toContain("gifPreferences.show_alert = false");
+      expect(helperBody).toContain("gifPreferences.loop = params.loop == true");
+      expect(helperBody).toContain("gifPreferences.show_alert = originalGifShowAlert");
+      expect(helperBody).toContain("gifPreferences.loop = originalGifLoop");
       expect(helperBody).toContain("File appeared before export and overwrite is false");
       expect(helperBody).toContain('file:seek("end")');
       expect(helperBody).toContain('file:seek("set", 0)');
@@ -511,6 +543,10 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(helperBody).toContain("app.sprite = sourceSprite");
       expect(helperBody).toContain("app.frame = sourceSprite.frames");
       expect(helperBody).toContain("os.remove(outputPath)");
+      const restoreCall = helperBody.indexOf("closePreviewAndRestoreSource()", helperBody.indexOf("local result ="));
+      const temporaryRead = helperBody.indexOf('io.open(outputPath, "rb")', restoreCall);
+      expect(restoreCall).toBeGreaterThan(-1);
+      expect(temporaryRead).toBeGreaterThan(restoreCall);
     });
 
     it("validates file operation handlers enforce strict path matching and no-clobber rules", () => {

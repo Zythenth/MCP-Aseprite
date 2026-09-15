@@ -18,6 +18,7 @@ describe("export_animation", () => {
   let originalAllowed: string | undefined;
   let originalProjectRoot: string | undefined;
   let handler: (params: any) => Promise<any>;
+  let spriteSheetHandler: (params: any) => Promise<any>;
   let saveProjectHandler: (params: any) => Promise<any>;
   let commands: Array<{ command: string; params: any }>;
   let failSequenceAt: number | null;
@@ -93,6 +94,7 @@ describe("export_animation", () => {
     workflowState = new AnimationWorkflowState(stateTracker);
     registerFileTools(server, dispatcher, stateTracker, workflowState);
     handler = tools.get("export_animation")!;
+    spriteSheetHandler = tools.get("export_sprite_sheet")!;
     saveProjectHandler = tools.get("save_project")!;
   });
 
@@ -105,7 +107,7 @@ describe("export_animation", () => {
   });
 
   it("exports GIF and sprite-sheet playback in the exact expanded tag order", async () => {
-    const gif = await handler({ format: "gif", outputPath: "exports/walk.gif", tagName: "walk", scale: 2 });
+    const gif = await handler({ format: "gif", outputPath: "exports/walk.gif", tag: "walk", scale: 2 });
     expect(gif.isError).toBeUndefined();
     expect(commands.at(-1)).toMatchObject({
       command: "render_animation_gif",
@@ -124,6 +126,22 @@ describe("export_animation", () => {
       command: "export_sprite_sheet",
       params: { frameNumbers: [1, 2, 3, 2], layout: "grid", columns: 2 },
     });
+
+    const directSheet = await spriteSheetHandler({ outputPath: "exports/direct.png", tag: "walk" });
+    expect(directSheet.isError).toBeUndefined();
+    expect(commands.at(-1)).toMatchObject({
+      command: "export_sprite_sheet",
+      params: { tagName: "walk", tag: undefined },
+    });
+
+    const conflictingTag = await handler({
+      format: "gif",
+      outputPath: "exports/conflict.gif",
+      tagName: "walk",
+      tag: "idle",
+    });
+    expect(conflictingTag.isError).toBe(true);
+    expect(parseText(conflictingTag).error).toMatch(/must match/i);
   });
 
   it("writes deterministic PNG-sequence names and reports their source frames", async () => {
@@ -200,5 +218,16 @@ describe("export_animation", () => {
       command: "save_sprite_as",
       params: { filePath: path.join(root, "exports", "hero.aseprite") },
     });
+
+    const aliasSave = await saveProjectHandler({ directory: "exports", filename: "slime.aseprite" });
+    expect(aliasSave.isError).toBeUndefined();
+    expect(commands.at(-1)).toMatchObject({
+      command: "save_sprite_as",
+      params: { filePath: path.join(root, "exports", "slime.aseprite") },
+    });
+
+    const conflict = await saveProjectHandler({ fileName: "hero.aseprite", filename: "slime.aseprite" });
+    expect(conflict.isError).toBe(true);
+    expect(parseText(conflict).error).toMatch(/must match/i);
   });
 });

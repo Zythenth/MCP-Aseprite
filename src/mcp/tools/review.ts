@@ -3,7 +3,8 @@ import { z } from "zod";
 import { CommandDispatcher } from "../../bridge/dispatcher.js";
 import { BridgeState } from "../../bridge/state.js";
 import { compareFrames } from "../../image/animation.js";
-import { decodePngBase64Sync, encodeRgbaToPngBase64 } from "../../image/png.js";
+import { encodeRgbaToPngBase64 } from "../../image/png.js";
+import { decodeBridgeCanvas } from "../../image/bridgeCanvas.js";
 import { ReviewState } from "../reviewState.js";
 import { bridgeToolError, confirmationError } from "./common.js";
 
@@ -43,7 +44,7 @@ export function registerReviewTools(
           revision: result.revision ?? state.getRevision(),
           frameNumber: result.frameNumber,
           layerName: params.layerName,
-          image: decodePngBase64Sync(result.pngBase64),
+          image: decodeBridgeCanvas(result),
         });
         const { image, ...metadata } = checkpoint;
         return { content: [{ type: "text" as const, text: JSON.stringify({ ...metadata, width: image.width, height: image.height }, null, 2) }] };
@@ -84,7 +85,7 @@ export function registerReviewTools(
           layerName: checkpoint.layerName,
         }, 10_000);
         if (typeof result.revision === "number") state.setRevision(result.revision);
-        const diff = compareFrames(checkpoint.image, decodePngBase64Sync(result.pngBase64), params.threshold ?? 0);
+        const diff = compareFrames(checkpoint.image, decodeBridgeCanvas(result), params.threshold ?? 0);
         const encoded = encodeRgbaToPngBase64(diff.data, diff.width, diff.height);
         return { content: [
           { type: "image" as const, data: encoded.base64, mimeType: "image/png" },

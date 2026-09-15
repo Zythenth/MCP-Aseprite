@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { compareFrames } from "../../image/animation.js";
-import { decodePngBase64Sync, encodeRgbaToPngBase64 } from "../../image/png.js";
+import { encodeRgbaToPngBase64 } from "../../image/png.js";
+import { decodeBridgeCanvas } from "../../image/bridgeCanvas.js";
 import { bridgeToolError, confirmationError } from "./common.js";
 const lintRule = z.enum(["orphan_pixel", "broken_outline", "banding", "pillow_shading", "symmetry_drift", "tile_seam"]);
 function requireSession(state) {
@@ -29,7 +30,7 @@ export function registerReviewTools(server, dispatcher, state, reviews) {
                 revision: result.revision ?? state.getRevision(),
                 frameNumber: result.frameNumber,
                 layerName: params.layerName,
-                image: decodePngBase64Sync(result.pngBase64),
+                image: decodeBridgeCanvas(result),
             });
             const { image, ...metadata } = checkpoint;
             return { content: [{ type: "text", text: JSON.stringify({ ...metadata, width: image.width, height: image.height }, null, 2) }] };
@@ -63,7 +64,7 @@ export function registerReviewTools(server, dispatcher, state, reviews) {
             }, 10_000);
             if (typeof result.revision === "number")
                 state.setRevision(result.revision);
-            const diff = compareFrames(checkpoint.image, decodePngBase64Sync(result.pngBase64), params.threshold ?? 0);
+            const diff = compareFrames(checkpoint.image, decodeBridgeCanvas(result), params.threshold ?? 0);
             const encoded = encodeRgbaToPngBase64(diff.data, diff.width, diff.height);
             return { content: [
                     { type: "image", data: encoded.base64, mimeType: "image/png" },

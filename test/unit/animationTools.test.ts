@@ -108,6 +108,17 @@ describe("animation inspection and preview tools", () => {
     expect(commands.filter((entry) => entry.command === "get_canvas")).toHaveLength(3);
   });
 
+  it("accepts tag as an explicit alias and rejects conflicting tag selectors", async () => {
+    const aliasResult = await tools.get("render_animation_preview")!.handler({ tag: "walk", scale: 1, filmstripScale: 1 });
+    expect(aliasResult.isError).toBeUndefined();
+    const renderCommand = commands.find((entry) => entry.command === "render_animation_gif");
+    expect(renderCommand?.params.frameNumbers).toEqual([1, 2, 3, 2]);
+
+    const conflict = await tools.get("render_animation_preview")!.handler({ tagName: "walk", tag: "idle" });
+    expect(conflict.isError).toBe(true);
+    expect(textPayload(conflict).error).toMatch(/must match/i);
+  });
+
   it("fails closed when the bridge lacks capabilities or timing changes during rendering", async () => {
     capabilities.animationGif = false;
     const unsupported = await tools.get("render_animation_preview")!.handler({ tagName: "walk" });

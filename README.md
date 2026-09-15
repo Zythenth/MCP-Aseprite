@@ -112,6 +112,8 @@ Caso o script não tenha sido copiado automaticamente pelo instalador:
 
 O diálogo do bridge exibirá o estado da conexão (`Connecting...`, `Connected` ou `Disconnected (Reconnecting...)`). Ele tenta se conectar ao servidor em `127.0.0.1:PORT` e reconecta automaticamente.
 
+Inspeções de canvas e previews retornados pelas ferramentas de pintura são transportados em memória e não precisam gravar PNG temporário. Na primeira exportação ou preview temporal que precise gravar GIF/PNG, o Aseprite ainda pode pedir autorização de arquivo. Depois de conferir que o caminho exibido é exatamente o `aseprite-bridge.lua` instalado na pasta de scripts, marque **Give full trust to this script** e confirme **Give Script Full Access** para não repetir a confirmação a cada saída. Não conceda essa confiança a outro script ou a uma cópia cuja origem você não verificou.
+
 > [!IMPORTANT]
 > **Não edite o arquivo `lua/aseprite-bridge.lua` para alterar a porta.** A porta e o token de autenticação são lidos dinamicamente das variáveis de ambiente (`ASEPRITE_PORT` e `ASEPRITE_BRIDGE_TOKEN`). Como o Aseprite é um processo independente, configure essas variáveis no ambiente do sistema ou do usuário e reinicie o Aseprite.
 
