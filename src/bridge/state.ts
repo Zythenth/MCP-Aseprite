@@ -36,6 +36,7 @@ export class BridgeState extends EventEmitter {
   private _capabilities: Record<string, boolean> = {};
   private _resyncRequired: boolean = true;
   private _gap: boolean = true;
+  private _connectionIssue: string | null = null;
 
   public isConnected(): boolean {
     return this._connected;
@@ -63,6 +64,17 @@ export class BridgeState extends EventEmitter {
 
   public getCapabilities(): Record<string, boolean> {
     return { ...this._capabilities };
+  }
+
+  public getConnectionIssue(): string | null {
+    return this._connectionIssue;
+  }
+
+  public setConnectionIssue(issue: string | null): void {
+    if (this._connectionIssue === issue) return;
+
+    this._connectionIssue = issue;
+    this.emit("connection_issue", { issue });
   }
 
   public isCompatible(): boolean {
@@ -98,6 +110,7 @@ export class BridgeState extends EventEmitter {
 
     this._connected = connected;
     if (connected) {
+      this.setConnectionIssue(null);
       this._clientAddress = clientAddress || null;
       this._connectedAt = new Date();
       logger.info(`BridgeState: Connected to client at ${this._clientAddress}`);

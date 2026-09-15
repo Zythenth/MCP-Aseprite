@@ -61,6 +61,17 @@ describe("aseprite_status MCP Tool Integration Tests", () => {
     expect(parsed.message).toContain("Aseprite is not connected");
   });
 
+  it("should return the retained bridge startup issue when the port is occupied", async () => {
+    state.setConnectionIssue("The Aseprite bridge port 32123 is owned by another aseprite-mcp process.");
+
+    const result: any = await client.callTool({ name: "aseprite_status", arguments: {} });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.connected).toBe(false);
+    expect(parsed.code).toBe("BRIDGE_STARTUP_BLOCKED");
+    expect(parsed.message).toContain("owned by another aseprite-mcp process");
+  });
+
   it("should return active sprite details and revision when MockBridge is connected", async () => {
     mockBridge = await startMockBridge({
       port: wsServer.getPort(),

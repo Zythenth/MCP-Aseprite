@@ -19,6 +19,7 @@ export class BridgeState extends EventEmitter {
     _capabilities = {};
     _resyncRequired = true;
     _gap = true;
+    _connectionIssue = null;
     isConnected() {
         return this._connected;
     }
@@ -39,6 +40,15 @@ export class BridgeState extends EventEmitter {
     }
     getCapabilities() {
         return { ...this._capabilities };
+    }
+    getConnectionIssue() {
+        return this._connectionIssue;
+    }
+    setConnectionIssue(issue) {
+        if (this._connectionIssue === issue)
+            return;
+        this._connectionIssue = issue;
+        this.emit("connection_issue", { issue });
     }
     isCompatible() {
         return isBridgeProtocolCompatible(this._bridgeProtocolVersion);
@@ -70,6 +80,7 @@ export class BridgeState extends EventEmitter {
             return;
         this._connected = connected;
         if (connected) {
+            this.setConnectionIssue(null);
             this._clientAddress = clientAddress || null;
             this._connectedAt = new Date();
             logger.info(`BridgeState: Connected to client at ${this._clientAddress}`);

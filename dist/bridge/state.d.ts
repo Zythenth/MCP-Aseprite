@@ -28,6 +28,7 @@ export declare class BridgeState extends EventEmitter {
     private _capabilities;
     private _resyncRequired;
     private _gap;
+    private _connectionIssue;
     isConnected(): boolean;
     getClientAddress(): string | null;
     getConnectedAt(): Date | null;
@@ -35,6 +36,8 @@ export declare class BridgeState extends EventEmitter {
     getActiveSprite(): ActiveSpriteMetadata | null;
     getSessionId(): string | null;
     getCapabilities(): Record<string, boolean>;
+    getConnectionIssue(): string | null;
+    setConnectionIssue(issue: string | null): void;
     isCompatible(): boolean;
     handleHello(data: BridgeHelloData): {
         resyncRequired: boolean;

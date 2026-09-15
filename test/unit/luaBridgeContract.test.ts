@@ -62,6 +62,17 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
   });
 
   describe("Static Architectural and Contract Invariant Validations", () => {
+    it("provides a guarded Timer fallback when the native WebSocket reconnection stalls", () => {
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
+
+      expect(luaContent).toContain("local RECONNECT_FALLBACK_DELAY_SECONDS = 6");
+      expect(luaContent).toContain("local function scheduleReconnectFallback");
+      expect(luaContent).toMatch(/Timer\{[\s\S]*?interval\s*=\s*RECONNECT_FALLBACK_DELAY_SECONDS/);
+      expect(luaContent).toContain("state.connectionGeneration ~= generation");
+      expect(luaContent).toContain("stopReconnectFallback()");
+      expect(luaContent).toContain("state.reconnectEnabled = false");
+    });
+
     it("validates MAX_CHANGE_JOURNAL_ENTRIES = 128 and handlers.get_changes_since with params.sinceRevision in Lua bridge", () => {
       const luaPath = path.resolve(rootDir, "lua/aseprite-bridge.lua");
       const luaContent = fs.readFileSync(luaPath, "utf-8");

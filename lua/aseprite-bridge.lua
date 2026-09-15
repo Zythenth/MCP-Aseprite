@@ -51,6 +51,7 @@ local WS_URL = WS_BASE_URL
 local MAX_PIXELS_BATCH = 100000
 local MAX_TILESET_PIXELS = 16777216
 local MAX_CHANGE_JOURNAL_ENTRIES = 128
+local RECONNECT_FALLBACK_DELAY_SECONDS = 6
 local JSON_NULL = {}
 
 -- ------------------------------------------------------------------------------
@@ -486,6 +487,12 @@ if rawget(_G, "__ASEPRITE_MCP_JSON_TEST_MODE") then return bridgeJson, JSON_NULL
 -- Global bridge state (anchored to survive lua_gc)
 if _G.__ASEPRITE_MCP_BRIDGE then
   local oldState = _G.__ASEPRITE_MCP_BRIDGE
+  oldState.reconnectEnabled = false
+  oldState.connectionGeneration = (oldState.connectionGeneration or 0) + 1
+  if oldState.reconnectTimer then
+    pcall(function() oldState.reconnectTimer:stop() end)
+    oldState.reconnectTimer = nil
+  end
   if oldState.sitechangeListenerId then
     pcall(function() app.events:off(oldState.sitechangeListenerId) end)
     oldState.sitechangeListenerId = nil
@@ -521,6 +528,10 @@ state.authenticated = false
 state.lastSpriteId = nil
 state.lastFrameNumber = nil
 state.lastLayerId = nil
+state.connectionGeneration = 0
+state.reconnectEnabled = true
+state.reconnectTimer = nil
+state.wsOpen = false
 
 -- ------------------------------------------------------------------------------
 -- Helper: Color & Hex Conversions (Mode-Aware Native and Protocol RGBA)
@@ -4226,7 +4237,49 @@ end
 -- ------------------------------------------------------------------------------
 -- UI Status Indicator & WebSocket Client Initializer
 -- ------------------------------------------------------------------------------
-local function initWebSocket(dlg)
+local initWebSocket
+
+local function stopReconnectFallback()
+  if state.reconnectTimer then
+    pcall(function() state.reconnectTimer:stop() end)
+    state.reconnectTimer = nil
+  end
+end
+
+local function scheduleReconnectFallback(dlg, generation)
+  if not state.reconnectEnabled or state.connectionGeneration ~= generation or state.authenticated or state.wsOpen then
+    return
+  end
+
+  stopReconnectFallback()
+  local timer
+  timer = Timer{
+    interval = RECONNECT_FALLBACK_DELAY_SECONDS,
+    ontick = function()
+      pcall(function() timer:stop() end)
+      if state.reconnectTimer == timer then
+        state.reconnectTimer = nil
+      end
+      if state.reconnectEnabled and state.connectionGeneration == generation and not state.authenticated and not state.wsOpen then
+        initWebSocket(dlg)
+      end
+    end
+  }
+  state.reconnectTimer = timer
+  timer:start()
+end
+
+initWebSocket = function(dlg)
+  stopReconnectFallback()
+  state.reconnectEnabled = true
+  state.connectionGeneration = state.connectionGeneration + 1
+  local generation = state.connectionGeneration
+  state.wsOpen = false
+  local previousWs = state.ws
+  if previousWs then
+    pcall(function() previousWs:close() end)
+  end
+
   dlg:modify{ id = "status_lbl", text = "Connecting to 127.0.0.1:" .. PORT .. "..." }
 
   state.ws = WebSocket{
@@ -4235,9 +4288,13 @@ local function initWebSocket(dlg)
     minreconnectwait = 1,
     maxreconnectwait = 5,
     onreceive = function(msgType, data, err)
-      if msgType == WebSocketMessageType.OPEN then
+      if state.connectionGeneration ~= generation then
+        return
+      elseif msgType == WebSocketMessageType.OPEN then
         local authStatus = AUTH_ENABLED and "enabled" or "disabled"
+        state.wsOpen = true
         state.authenticated = false
+        stopReconnectFallback()
         dlg:modify{ id = "status_lbl", text = "Authenticating (" .. PORT .. ")..." }
         local hello = {
           event = "hello",
@@ -4267,12 +4324,16 @@ local function initWebSocket(dlg)
         end
 
       elseif msgType == WebSocketMessageType.CLOSE then
+        state.wsOpen = false
         state.authenticated = false
         dlg:modify{ id = "status_lbl", text = "Disconnected (Reconnecting...)" }
+        scheduleReconnectFallback(dlg, generation)
 
       elseif msgType == WebSocketMessageType.ERROR then
+        state.wsOpen = false
         state.authenticated = false
         dlg:modify{ id = "status_lbl", text = "Connection error (check server logs)" }
+        scheduleReconnectFallback(dlg, generation)
 
       elseif msgType == WebSocketMessageType.TEXT then
         local ok, req = pcall(bridgeJson.decode, data)
@@ -4330,6 +4391,10 @@ local function initBridge()
   local dlg = Dialog{
     title = "Aseprite MCP Bridge",
     onclose = function()
+      state.reconnectEnabled = false
+      state.connectionGeneration = state.connectionGeneration + 1
+      state.wsOpen = false
+      stopReconnectFallback()
       if state.sitechangeListenerId then
         pcall(function() app.events:off(state.sitechangeListenerId) end)
         state.sitechangeListenerId = nil
@@ -4356,6 +4421,9 @@ local function initBridge()
   dlg:label{ id = "status_lbl", label = "Status:", text = "Connecting..." }
   dlg:label{ id = "port_lbl", label = "Target:", text = WS_BASE_URL .. portNote .. " [Auth: " .. authStatus .. "]" }
   dlg:button{ id = "reconnect_btn", text = "Reconnect", onclick = function()
+    state.connectionGeneration = state.connectionGeneration + 1
+    state.wsOpen = false
+    stopReconnectFallback()
     if state.ws then pcall(function() state.ws:close() end) end
     initWebSocket(dlg)
   end }

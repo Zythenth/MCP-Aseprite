@@ -19,9 +19,11 @@ export function registerStatusTool(
       // Graceful fallback when bridge is disconnected
       if (!dispatcher.isConnected() && !stateTracker.isConnected()) {
         logger.debug("[Tool:aseprite_status] Bridge disconnected - returning fallback status");
+        const connectionIssue = stateTracker.getConnectionIssue();
         const fallback = {
           connected: false,
-          message: "Aseprite is not connected. Please ensure Aseprite is open and lua/aseprite-bridge.lua is running, or start the Mock Bridge for testing.",
+          message: connectionIssue ?? "Aseprite is not connected. Please ensure Aseprite is open and lua/aseprite-bridge.lua is running, or start the Mock Bridge for testing.",
+          code: connectionIssue ? "BRIDGE_STARTUP_BLOCKED" : undefined,
           port: config.port,
           hasActiveSprite: false,
           revision: 0,

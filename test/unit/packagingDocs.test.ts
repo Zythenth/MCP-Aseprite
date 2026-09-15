@@ -107,6 +107,8 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
 
     expect(startContent).toContain("[switch]$ReadOnly");
     expect(startContent).toContain("[string[]]$Toolsets");
+    expect(startContent).toContain("[switch]$ManualBridgeServer");
+    expect(startContent).toContain("standalone bridge server");
     expect(startContent).toContain("ASEPRITE_READ_ONLY");
     expect(startContent).toContain("ASEPRITE_TOOLSETS");
   });

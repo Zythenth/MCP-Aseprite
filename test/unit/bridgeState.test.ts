@@ -14,6 +14,16 @@ function hello(sessionId: string, revision: number) {
 }
 
 describe("BridgeState synchronization", () => {
+  it("clears a startup issue when the bridge connects", () => {
+    const state = new BridgeState();
+    state.setConnectionIssue("Bridge port is occupied");
+
+    expect(state.getConnectionIssue()).toBe("Bridge port is occupied");
+
+    state.setConnected(true, "127.0.0.1");
+    expect(state.getConnectionIssue()).toBeNull();
+  });
+
   it("clears reconnect resync state only for the current session and exact revision", () => {
     const state = new BridgeState();
     state.handleHello(hello("session-123", 4));

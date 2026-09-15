@@ -110,7 +110,7 @@ Caso o script não tenha sido copiado automaticamente pelo instalador:
 4. No Aseprite, clique em **File > Scripts > Rescan Scripts Folder**;
 5. Execute **File > Scripts > aseprite-bridge**.
 
-O diálogo do bridge exibirá o estado da conexão (`Connecting...`, `Connected` ou `Disconnected (Reconnecting...)`). Ele tenta se conectar ao servidor em `127.0.0.1:PORT` e reconecta automaticamente.
+O diálogo do bridge exibirá o estado da conexão (`Connecting...`, `Connected` ou `Disconnected (Reconnecting...)`). Ele tenta se conectar ao servidor em `127.0.0.1:PORT` e reconecta automaticamente. Se a retomada nativa do WebSocket não abrir uma sessão em até seis segundos, o bridge substitui a conexão automaticamente; não é necessário clicar em **Reconnect**.
 
 Inspeções de canvas e previews retornados pelas ferramentas de pintura são transportados em memória e não precisam gravar PNG temporário. Na primeira exportação ou preview temporal que precise gravar GIF/PNG, o Aseprite ainda pode pedir autorização de arquivo. Depois de conferir que o caminho exibido é exatamente o `aseprite-bridge.lua` instalado na pasta de scripts, marque **Give full trust to this script** e confirme **Give Script Full Access** para não repetir a confirmação a cada saída. Não conceda essa confiança a outro script ou a uma cópia cuja origem você não verificou.
 
@@ -242,11 +242,14 @@ Crie uma animação no Aseprite usando exclusivamente as ferramentas aseprite/.
 
 A skill proíbe o uso de Python, terminal e scripts auxiliares para gerar pixels, exige edição por coordenadas explícitas, preview, análise temporal, revisão e verificação dos arquivos finais. Ela complementa as instruções enviadas automaticamente pelo próprio servidor MCP.
 
+> [!IMPORTANT]
+> **Use somente uma instância do servidor por bridge.** Quando o cliente MCP inicia `dist/index.js` a partir da configuração acima, ele já é o servidor que deve receber a conexão do Aseprite. Não execute `npm start` ou `start.ps1` em paralelo: isso ocupa a porta do bridge e impede a segunda instância de controlar o Aseprite. Se houver uma instância manual antiga, o cliente MCP manterá `aseprite_status` disponível, exibirá o conflito e tentará retomar a porta automaticamente a cada dois segundos depois que a instância antiga for encerrada.
+
 ---
 
 ## Execução Manual e Scripts
 
-Para executar o servidor manualmente:
+Para diagnóstico standalone (não junto com um cliente MCP configurado), execute:
 
 ```bash
 npm start
@@ -255,17 +258,17 @@ npm start
 No Windows via PowerShell:
 
 ```powershell
-# Execução padrão
-.\start.ps1
+# Execução standalone explícita
+.\start.ps1 -ManualBridgeServer
 
 # Especificando porta, diretórios autorizados e a raiz para caminhos relativos
-.\start.ps1 -Port 32123 -AllowedPaths @("C:\Projetos\PixelArt") -ProjectRoot "C:\Projetos\PixelArt"
+.\start.ps1 -ManualBridgeServer -Port 32123 -AllowedPaths @("C:\Projetos\PixelArt") -ProjectRoot "C:\Projetos\PixelArt"
 
 # Execução com Mock Bridge (headless, sem Aseprite)
-.\start.ps1 -Mock
+.\start.ps1 -ManualBridgeServer -Mock
 
 # Revisão sem mutações, expondo apenas conjuntos necessários
-.\start.ps1 -ReadOnly -Toolsets visual,palette,animation,pixel-art,review
+.\start.ps1 -ManualBridgeServer -ReadOnly -Toolsets visual,palette,animation,pixel-art,review
 ```
 
 > [!TIP]
