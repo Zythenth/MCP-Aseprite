@@ -15,9 +15,17 @@ export const MUTATING_TOOLS = new Set([
     "apply_ordered_dither",
     "batch_animation_edits",
     "reset_animation_workflow",
+    "start_live_painting", "begin_live_painting_stage", "complete_live_painting_stage",
+    "pause_live_painting", "continue_live_painting", "set_live_painting_speed",
+    "cancel_live_painting", "undo_live_painting_stage", "finish_live_painting",
 ]);
-export function createPolicyToolRegistrar(server, readOnly) {
-    if (!readOnly)
+const LIVE_PAINTING_CONTROL_TOOLS = new Set([
+    "start_live_painting", "begin_live_painting_stage", "complete_live_painting_stage",
+    "pause_live_painting", "continue_live_painting", "set_live_painting_speed",
+    "cancel_live_painting", "undo_live_painting_stage", "finish_live_painting",
+]);
+export function createPolicyToolRegistrar(server, readOnly, livePainting) {
+    if (!readOnly && !livePainting)
         return server;
     return new Proxy(server, {
         get(target, property) {
@@ -25,8 +33,30 @@ export function createPolicyToolRegistrar(server, readOnly) {
                 const register = target.tool.bind(target);
                 return (...args) => {
                     const name = args[0];
-                    if (typeof name === "string" && MUTATING_TOOLS.has(name))
+                    if (readOnly && typeof name === "string" && MUTATING_TOOLS.has(name))
                         return undefined;
+                    if (typeof name !== "string" || !livePainting || LIVE_PAINTING_CONTROL_TOOLS.has(name) || !MUTATING_TOOLS.has(name)) {
+                        return register(...args);
+                    }
+                    const handlerIndex = args.length - 1;
+                    const handler = args[handlerIndex];
+                    if (typeof handler !== "function")
+                        return register(...args);
+                    args[handlerIndex] = async (...handlerArgs) => {
+                        try {
+                            livePainting.beforeSpriteMutation(name);
+                        }
+                        catch (error) {
+                            return {
+                                content: [{ type: "text", text: JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }, null, 2) }],
+                                isError: true,
+                            };
+                        }
+                        const result = await handler(...handlerArgs);
+                        if (!result?.isError)
+                            livePainting.recordSpriteMutation(name);
+                        return result;
+                    };
                     return register(...args);
                 };
             }

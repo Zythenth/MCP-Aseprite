@@ -40,5 +40,7 @@ describe("MCP tool exposure policy", () => {
     expect(names).not.toContain("save_sprite");
     expect(names).not.toContain("export_animation");
     expect(names).not.toContain("apply_ordered_dither");
+    expect(names).not.toContain("start_live_painting");
+    expect(names).toContain("get_live_painting_status");
   });
 });

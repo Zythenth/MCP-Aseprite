@@ -20,7 +20,7 @@ Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 - **Inspeção visual rica**: previews em PNG com escala nearest-neighbor, réguas de coordenadas e grades customizáveis.
 - **Leitura precisa de pixels**: formatos hexadecimal (`#RRGGBBAA`), RGBA, indexado e compacto otimizado para economia de tokens.
 - **Edição em lote e Undo atômico**: operações em lote agrupadas em uma única entrada de histórico de Undo.
-- **114 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, preview animado, revisão visual, análise de pixel art, tween, smear, aprovação humana e exportação para engines.
+- **132 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, preview animado, revisão visual, análise de pixel art, tween, smear, aprovação humana, pintura ao vivo e exportação para engines.
 - **Estrutura nativa do Aseprite**: cels vinculados, grupos aninhados, pivôs/nine-patch, blend modes, merge/flatten e exportação avançada por tag, intervalo e camada.
 - **Ciclo visual incremental**: preview opcional após mutações, filmstrip, onion skin, comparação exata entre frames, checkpoints e histórico de alterações por revisão.
 - **Qualidade de pixel art**: lint heurístico, CIEDE2000, análise de paleta, rampas com hue shift e dithering Bayer determinístico.
@@ -311,7 +311,7 @@ No Windows via PowerShell:
 
 ## Resumo das Ferramentas MCP
 
-O conjunto completo contém **114 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
+O conjunto completo contém **132 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
 
 ### Inspeção Visual e Leitura
 - `aseprite_status`: Estado da conexão, arquivo ativo, tamanho do canvas, camada e frame selecionados e revisão atual.
@@ -370,6 +370,14 @@ O conjunto completo contém **114 ferramentas únicas**. Para reduzir o contexto
 - `create_pixel_art_tween` gera intermediários entre duas poses-chave movendo clusters 4-conectados da mesma cor; não mistura alfa, redimensiona ou suaviza pixels. Os frames produzidos exigem inspeção com `get_canvas`, preview temporal e QA.
 - `create_smear_frame` insere um único frame de smear nítido entre keyframes normais, calculando a direção a partir dos limites ocupados e preservando as poses original e final.
 - `request_human_approval` abre um diálogo nativo no Aseprite com preview, `Aprovar`, `Pedir alterações` e `Rejeitar`. O recibo aprovado pode ser exigido antes de um export final.
+
+### Modo pintura ao vivo
+
+- `start_live_painting` inicia um processo observável e devolve o PNG inicial. Ele aceita as etapas `sketch`, `blocks`, `silhouette`, `line`, `base_colors`, `shadows`, `details` e `polish`, além de velocidade e modo comentário.
+- Para cada etapa, o agente deve chamar `begin_live_painting_stage`, fazer exatamente uma mutação atômica no Aseprite e chamar `complete_live_painting_stage`. A conclusão retorna o PNG atualizado, de modo que a construção fica visível no canvas e registrada no log.
+- `pause_live_painting`, `continue_live_painting`, `cancel_live_painting`, `set_live_painting_speed` e `undo_live_painting_stage` fornecem os controles do processo. Enquanto ativo, o MCP bloqueia edições fora da etapa aberta; cada etapa contém uma única transação do Aseprite para que o Undo da etapa seja seguro. Cancelar não apaga silenciosamente a arte já feita.
+- `get_live_painting_status`, `list_live_painting_snapshots`, `get_live_painting_snapshot` e `render_live_painting_replay` permitem acompanhar e revisar o log visual. Os snapshots ficam apenas em memória, até 16 imagens e 64 MiB por processo, e são descartados se a conexão ou o documento mudar.
+- A velocidade é uma recomendação de espaçamento entre snapshots visíveis: `slow` 900 ms, `normal` 350 ms e `fast` 100 ms. Com `commentaryMode: true`, cada etapa exige uma explicação curta do agente.
 
 ### Arquivos e exportação
 

@@ -25,9 +25,11 @@ import { registerPixelMotionTools } from "./tools/pixelMotion.js";
 import { registerApprovalTools } from "./tools/approval.js";
 import { registerEngineExportTools } from "./tools/engineExport.js";
 import { registerBatchExportTools } from "./tools/batchExport.js";
+import { registerLivePaintingTools } from "./tools/livePainting.js";
 import { ReviewState } from "./reviewState.js";
 import { AnimationWorkflowState } from "./animationWorkflowState.js";
 import { ApprovalState } from "./approvalState.js";
+import { LivePaintingState } from "./livePaintingState.js";
 import { createPolicyToolRegistrar } from "./toolPolicy.js";
 import type { Toolset } from "../config.js";
 import { registerMcpResources } from "./resources/index.js";
@@ -45,6 +47,7 @@ export function createMcpServer(
   const reviewState = new ReviewState();
   const workflowState = new AnimationWorkflowState(activeStateTracker);
   const approvalState = new ApprovalState();
+  const livePaintingState = new LivePaintingState(activeStateTracker);
   const readOnly = options.readOnly ?? config.readOnly;
   const enabledToolsets = new Set(options.toolsets ?? [...config.toolsets]);
 
@@ -61,12 +64,15 @@ export function createMcpServer(
       instructions: PIXEL_ART_WORKFLOW_INSTRUCTIONS,
     }
   );
-  const toolRegistrar = createPolicyToolRegistrar(server, readOnly);
+  const toolRegistrar = createPolicyToolRegistrar(server, readOnly, livePaintingState);
 
   // Register Core and Specialized Tools
   registerStatusTool(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("visual")) registerVisualTools(toolRegistrar, activeDispatcher, activeStateTracker);
-  if (enabledToolsets.has("editing")) registerEditingTools(toolRegistrar, activeDispatcher, activeStateTracker);
+  if (enabledToolsets.has("editing")) {
+    registerEditingTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    registerLivePaintingTools(toolRegistrar, activeDispatcher, activeStateTracker, livePaintingState);
+  }
   if (enabledToolsets.has("files")) registerFileTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState, approvalState);
   if (enabledToolsets.has("files")) registerEngineExportTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("files")) registerBatchExportTools(toolRegistrar, activeDispatcher);

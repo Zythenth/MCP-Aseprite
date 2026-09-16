@@ -162,7 +162,7 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
 
   it("README documents the complete configurable surface and in-memory review-state limitation", () => {
     const readmeContent = fs.readFileSync(path.resolve(rootDir, "README.md"), "utf-8");
-    expect(readmeContent).toContain("114 ferramentas");
+    expect(readmeContent).toContain("132 ferramentas");
     expect(readmeContent).toContain("ASEPRITE_READ_ONLY");
     expect(readmeContent).toContain("ASEPRITE_TOOLSETS");
     expect(readmeContent).toContain("export_sprite_sheet");

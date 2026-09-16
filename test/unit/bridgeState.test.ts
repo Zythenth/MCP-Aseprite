@@ -99,4 +99,28 @@ describe("BridgeState synchronization", () => {
     expect(state.getStatus().previousSessionId).toBe("shared-session-a");
     expect(helloEvents).toEqual(["shared-session-a", "shared-session-b"]);
   });
+
+  it("keeps handshake identity when a legacy status response omits optional protocol fields", () => {
+    const state = new BridgeState();
+    state.handleHello(hello("session-from-hello", 3));
+    state.setConnected(true, "127.0.0.1");
+
+    state.applyStatus({
+      connected: true,
+      hasActiveSprite: true,
+      filename: "legacy.aseprite",
+      width: 16,
+      height: 16,
+      colorMode: "rgb",
+      layersCount: 1,
+      framesCount: 1,
+      activeLayer: "Layer 1",
+      activeFrame: 1,
+      revision: 3,
+    });
+
+    expect(state.getSessionId()).toBe("session-from-hello");
+    expect(state.getCapabilities()).toEqual({ incrementalChanges: true });
+    expect(state.getActiveSprite()?.filename).toBe("legacy.aseprite");
+  });
 });

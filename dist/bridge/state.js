@@ -125,19 +125,18 @@ export class BridgeState extends EventEmitter {
         const previousSprite = this._activeSprite;
         const previousRevision = this._revision;
         const previousSessionId = this._sessionId;
-        const sessionChanged = status.sessionId !== null &&
-            status.sessionId !== undefined &&
-            status.sessionId !== previousSessionId;
+        const reportedSessionId = status.sessionId === undefined ? previousSessionId : status.sessionId;
+        const sessionChanged = reportedSessionId !== null && reportedSessionId !== previousSessionId;
         this._connected = status.connected;
         this._clientAddress = status.connected ? clientAddress || this._clientAddress : null;
         this._connectedAt = status.connected ? this._connectedAt || new Date() : null;
         this._revision = sessionChanged ? status.revision : Math.max(this._revision, status.revision);
-        this._bridgeProtocolVersion = status.bridgeProtocolVersion ?? null;
-        this._asepriteVersion = status.asepriteVersion ?? null;
-        this._apiVersion = status.apiVersion ?? null;
-        this._sessionId = status.sessionId ?? null;
+        this._bridgeProtocolVersion = status.bridgeProtocolVersion === undefined ? this._bridgeProtocolVersion : status.bridgeProtocolVersion;
+        this._asepriteVersion = status.asepriteVersion === undefined ? this._asepriteVersion : status.asepriteVersion;
+        this._apiVersion = status.apiVersion === undefined ? this._apiVersion : status.apiVersion;
+        this._sessionId = reportedSessionId;
         this._previousSessionId = status.previousSessionId ?? (sessionChanged ? previousSessionId : this._previousSessionId);
-        this._capabilities = { ...(status.capabilities ?? {}) };
+        this._capabilities = status.capabilities === undefined ? this._capabilities : { ...status.capabilities };
         this._resyncRequired = status.sync?.resyncRequired ?? !status.connected;
         this._gap = status.sync?.gap ?? !status.connected;
         this._activeSprite = status.hasActiveSprite

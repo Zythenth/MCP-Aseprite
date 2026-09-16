@@ -36,6 +36,8 @@ export const PIXEL_ART_WORKFLOW_INSTRUCTIONS = `You are operating Aseprite throu
 
 6. TOOL AND ITERATION DISCIPLINE
 - Prefer batch edits such as set_pixels so one logical change is one undo step. Work in small verifiable passes: inspect, edit, inspect again, then correct. Use undo when a pass reduces readability or violates the plan.
+- When the user requests live painting, call start_live_painting before the first edit. For every declared stage, call begin_live_painting_stage, make exactly one atomic Aseprite mutation, visually inspect the editor, then call complete_live_painting_stage and examine its returned PNG snapshot before beginning the next stage. Use pause_live_painting, continue_live_painting, cancel_live_painting, set_live_painting_speed, and undo_live_painting_stage only through their explicit controls; do not bypass the process with a normal undo/redo or hidden background edits.
+- Live painting is transparent rather than autonomous: speed is the recommended spacing between visible stage snapshots, commentary mode requires a brief explanation per stage, and the retained visual log can be inspected with list_live_painting_snapshots, get_live_painting_snapshot, or render_live_painting_replay. The log is in memory for the connected sprite session and is cleared when that session disconnects or changes document.
 - Keep construction, shading, effects, guides, and alternatives on sensibly named layers when separation helps revision or export. Do not create layers with no practical purpose.
 - Clean transformed, mirrored, scaled, or rotated art by hand afterward. Use only nearest-neighbor integer scaling for final pixel art unless a different resampling method is explicitly required.
 
