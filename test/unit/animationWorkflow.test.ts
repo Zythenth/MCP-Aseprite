@@ -10,6 +10,7 @@ import {
 import { registerWorkflowTools } from "../../src/mcp/tools/workflow.js";
 import { registerAnimationInspectionTools } from "../../src/mcp/tools/animation.js";
 import { registerFileTools } from "../../src/mcp/tools/files.js";
+import { ApprovalState } from "../../src/mcp/approvalState.js";
 import { encodeRgbaToPngBuffer } from "../../src/image/png.js";
 import { createPolicyToolRegistrar, MUTATING_TOOLS } from "../../src/mcp/toolPolicy.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -668,12 +669,15 @@ describe("Animation Workflow State and Tools - Full Contract Verification", () =
       } as unknown as CommandDispatcher;
 
       try {
-        registerFileTools(fakeServer, fakeDispatcher, stateTracker, workflowState);
+        const approvalState = new ApprovalState();
+        const approval = approvalState.record({ decision: "approved", feedback: "QA accepted", revision: 1, sessionId: stateTracker.getSessionId() });
+        registerFileTools(fakeServer, fakeDispatcher, stateTracker, workflowState, approvalState);
         const exportAnimation = registeredTools.get("export_animation");
         const success = await exportAnimation({
           format: "png",
           outputPath: "final.png",
           final: true,
+          humanApprovalId: approval.approvalId,
         });
         const successPayload = JSON.parse(success.content[0].text);
         expect(success.isError).toBeUndefined();

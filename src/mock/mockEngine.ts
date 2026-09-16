@@ -2866,6 +2866,15 @@ export class MockAsepriteEngine {
         };
       }
 
+      case "show_human_approval":
+        return {
+          decision: params.mockDecision ?? "approved",
+          feedback: params.mockFeedback ?? "Mock approval",
+          frameNumber: this.resolveTargetFrame(params.frameNumber).frameNumber,
+          previewShown: true,
+          revision: this.revision,
+        };
+
       // File / Canvas tools
       case "open_sprite":
         this.filename = params.filePath;

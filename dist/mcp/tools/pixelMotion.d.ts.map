@@ -1,0 +1,1 @@
+{"version":3,"file":"pixelMotion.d.ts","sourceRoot":"","sources":["../../../src/mcp/tools/pixelMotion.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,SAAS,EAAE,MAAM,yCAAyC,CAAC;AAEpE,OAAO,KAAK,EAAE,iBAAiB,EAAE,MAAM,4BAA4B,CAAC;AACpE,OAAO,KAAK,EAAE,WAAW,EAAE,MAAM,uBAAuB,CAAC;AAkFzD,wBAAgB,wBAAwB,CAAC,MAAM,EAAE,SAAS,EAAE,UAAU,EAAE,iBAAiB,EAAE,KAAK,EAAE,WAAW,GAAG,IAAI,CAkFnH"}

@@ -19,6 +19,7 @@ import {
   BridgeError,
   BridgeErrorCode,
   type BridgeHelloAckMessage,
+  type BridgeHelloRejectedMessage,
   type BridgeHelloData,
   type BridgePeerAckMessage,
   type BridgePeerHelloMessage,
@@ -41,6 +42,8 @@ export interface WsServerOptions {
   maxPayload?: number;
   token?: string;
   handshakeTimeoutMs?: number;
+  allowRemote?: boolean;
+  allowedRemoteIps?: string[];
 }
 
 interface AliveWebSocket extends WebSocket {
@@ -50,6 +53,7 @@ interface AliveWebSocket extends WebSocket {
 export class BridgeWebSocketServer {
   private static readonly MAX_PENDING_HANDSHAKES = MAX_PENDING_COMMANDS;
   private static readonly MAX_PEER_CONNECTIONS = MAX_PENDING_COMMANDS;
+  private static readonly BUSY_BRIDGE_REJECTION_GRACE_MS = 1000;
 
   private wss: WebSocketServer | null = null;
   private activeSocket: AliveWebSocket | null = null;
@@ -62,6 +66,8 @@ export class BridgeWebSocketServer {
   private readonly maxPayload: number;
   private readonly token?: string;
   private readonly handshakeTimeoutMs: number;
+  private readonly allowRemote: boolean;
+  private readonly allowedRemoteIps: ReadonlySet<string>;
   private readonly dispatcher: CommandDispatcher;
   private readonly state: BridgeState;
 
@@ -74,6 +80,17 @@ export class BridgeWebSocketServer {
     this.maxPayload = options.maxPayload !== undefined ? options.maxPayload : MAX_BRIDGE_PAYLOAD_BYTES;
     this.token = options.token;
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 5000;
+    this.allowRemote = options.allowRemote === true;
+    this.allowedRemoteIps = new Set(options.allowedRemoteIps ?? []);
+    if (this.allowRemote && (!this.token || this.token.length < 32)) {
+      throw new Error("Remote bridge mode requires a token of at least 32 characters.");
+    }
+    if (!this.allowRemote && !this.isLoopbackAddress(this.host)) {
+      throw new Error("Refusing non-loopback bridge bind without explicit remote mode.");
+    }
+    if (this.allowRemote && this.allowedRemoteIps.size === 0) {
+      throw new Error("Remote bridge mode requires an explicit allowedRemoteIps allowlist.");
+    }
   }
 
   public async start(): Promise<void> {
@@ -90,7 +107,7 @@ export class BridgeWebSocketServer {
           started = true;
           const addr = this.wss?.address();
           const actualPort = typeof addr === "object" && addr !== null ? addr.port : this.port;
-          logger.info(`Bridge WebSocket server listening strictly on ${this.host}:${actualPort}`);
+          logger.info(`Bridge WebSocket server listening on ${this.host}:${actualPort}${this.allowRemote ? " (authenticated private remote mode)" : " (loopback)"}`);
           if (!this.token) {
             logger.warn("Bridge WebSocket authentication is disabled on loopback");
           }
@@ -131,9 +148,10 @@ export class BridgeWebSocketServer {
   private handleConnection(socket: AliveWebSocket, req: IncomingMessage): void {
     const remoteIp = req.socket.remoteAddress;
 
-    // Strict loopback security validation
-    if (!this.isLoopbackAddress(remoteIp)) {
-      logger.warn(`Security alert: Terminated unauthorized non-loopback connection from ${remoteIp}`);
+    const normalizedIp = remoteIp?.replace(/^::ffff:/, "");
+    const allowedRemote = this.allowRemote && normalizedIp !== undefined && this.allowedRemoteIps.has(normalizedIp);
+    if (!this.isLoopbackAddress(remoteIp) && !allowedRemote) {
+      logger.warn(`Security alert: Terminated unauthorized bridge connection from ${remoteIp}`);
       socket.terminate();
       return;
     }
@@ -162,6 +180,31 @@ export class BridgeWebSocketServer {
       cleanupCandidate();
       logger.warn(`Rejected bridge connection from ${remoteIp}: ${reason}`);
       socket.close(code, reason);
+    };
+
+    // Aseprite's IXWebSocket reconnects immediately when a connection opens
+    // and the server closes it straight away. Tell a valid competing bridge
+    // why it was rejected first, giving current extensions one UI tick to
+    // stop their native socket; old extensions still receive a bounded close.
+    const rejectBusyBridge = () => {
+      const reason = "Another Aseprite bridge is already connected";
+      cleanupCandidate();
+      logger.warn(`Rejected bridge connection from ${remoteIp}: ${reason}`);
+      const rejection: BridgeHelloRejectedMessage = {
+        event: "hello_rejected",
+        data: {
+          code: "BRIDGE_BUSY",
+          retryAfterMs: BridgeWebSocketServer.BUSY_BRIDGE_REJECTION_GRACE_MS,
+        },
+      };
+      socket.send(JSON.stringify(rejection));
+      const closeTimer = setTimeout(() => {
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+          socket.close(1008, reason);
+        }
+      }, BridgeWebSocketServer.BUSY_BRIDGE_REJECTION_GRACE_MS);
+      socket.once("close", () => clearTimeout(closeTimer));
+      socket.once("error", () => clearTimeout(closeTimer));
     };
 
     const handshakeTimer = setTimeout(() => {
@@ -218,7 +261,7 @@ export class BridgeWebSocketServer {
           (this.activeSocket.readyState === WebSocket.OPEN ||
             this.activeSocket.readyState === WebSocket.CONNECTING)
         ) {
-          rejectCandidate(1008, "Another Aseprite bridge is already connected");
+          rejectBusyBridge();
           return;
         }
 

@@ -53,6 +53,11 @@ export declare function parsePort(val: string | undefined, defaultVal?: number):
  * Falls back to defaultVal only when the input is absent (undefined) or blank (empty/whitespace-only).
  */
 export declare function parseCommandTimeout(val: string | undefined, defaultVal?: number): number;
+export declare function isLoopbackHost(value: string): boolean;
+export declare function isPrivateIpv4(value: string): boolean;
+/** Remote mode deliberately accepts only private LAN/VM IPv4 addresses, never wildcard or public binds. */
+export declare function parseBridgeHost(value: string | undefined, remoteMode: boolean, token?: string): string;
+export declare function parseRemotePeers(value: string | undefined, remoteMode: boolean): string[];
 export declare const BRIDGE_TOKEN_REGEX: RegExp;
 export declare const TOOLSETS: readonly ["core", "visual", "editing", "files", "shapes", "layers", "frames", "palette", "cels", "slices", "selection", "tiles", "animation", "pixel-art", "review"];
 export type Toolset = typeof TOOLSETS[number];
@@ -61,11 +66,13 @@ export declare function parseToolsets(value: string | undefined): Toolset[];
 export declare function parseBridgeToken(val: string | undefined): string | undefined;
 export declare function resolvePortEnv(): string | undefined;
 export declare const PORT: number;
+export declare const BRIDGE_TOKEN: string | undefined;
+export declare const REMOTE_MODE: boolean;
 export declare const HOST: string;
+export declare const REMOTE_PEERS: string[];
 export declare const COMMAND_TIMEOUT_MS: number;
 export declare const ALLOWED_PATHS: string[];
 export declare const PROJECT_ROOT: string;
-export declare const BRIDGE_TOKEN: string | undefined;
 export declare const READ_ONLY: boolean;
 export declare const ENABLED_TOOLSETS: ("core" | "visual" | "editing" | "files" | "shapes" | "layers" | "frames" | "palette" | "cels" | "slices" | "selection" | "tiles" | "animation" | "pixel-art" | "review")[];
 export declare const config: {
@@ -74,6 +81,8 @@ export declare const config: {
     readonly commandTimeoutMs: number;
     readonly heavyCommandTimeoutMs: 15000;
     readonly bridgeToken: string | undefined;
+    readonly remoteMode: boolean;
+    readonly remotePeers: string[];
     readonly readOnly: boolean;
     readonly toolsets: ("core" | "visual" | "editing" | "files" | "shapes" | "layers" | "frames" | "palette" | "cels" | "slices" | "selection" | "tiles" | "animation" | "pixel-art" | "review")[];
     readonly wsHeartbeatIntervalMs: 15000;

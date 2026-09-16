@@ -13,6 +13,8 @@ import { registerAnimationInspectionTools } from "../../src/mcp/tools/animation.
 import { registerBatchTools } from "../../src/mcp/tools/batch.js";
 import { registerFileTools } from "../../src/mcp/tools/files.js";
 import { registerWorkflowTools } from "../../src/mcp/tools/workflow.js";
+import { registerApprovalTools } from "../../src/mcp/tools/approval.js";
+import { ApprovalState } from "../../src/mcp/approvalState.js";
 
 const GIF_BASE64 = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
@@ -129,6 +131,7 @@ describe("Animation workflow E2E acceptance", () => {
         }
         if (command === "save_sprite_as") return { success: true, filePath: params.filePath, revision };
         if (command === "export_png") return { success: true, outputPath: params.outputPath, revision };
+        if (command === "show_human_approval") return { decision: "approved", feedback: "Approved in test", revision };
         throw new Error(`Unexpected command: ${command}`);
       },
     };
@@ -136,7 +139,9 @@ describe("Animation workflow E2E acceptance", () => {
     registerWorkflowTools(server, dispatcher, state, workflowState);
     registerAnimationInspectionTools(server, dispatcher, state, workflowState);
     registerBatchTools(server, dispatcher, state);
-    registerFileTools(server, dispatcher, state, workflowState);
+    const approvalState = new ApprovalState();
+    registerApprovalTools(server, dispatcher, state, approvalState);
+    registerFileTools(server, dispatcher, state, workflowState, approvalState);
     const call = async (name: string, args: any = {}) => tools.get(name)!(args);
 
     const loaded = textPayload(await call("load_reference_image", { filePath: referencePath }));
@@ -245,12 +250,16 @@ describe("Animation workflow E2E acceptance", () => {
     const saved = await call("save_project", { filePath: "hero_final.aseprite" });
     expect(saved.isError).toBeUndefined();
 
+    const approval = textPayload(await call("request_human_approval", { summary: "Final workflow export", frameNumber: 1 }));
+    expect(approval.decision).toBe("approved");
+
     const finalExport = await call("export_animation", {
       format: "png",
       outputPath: "hero_final.png",
       fromFrame: 1,
       toFrame: 2,
       final: true,
+      humanApprovalId: approval.approvalId,
     });
     expect(finalExport.isError).toBeUndefined();
     expect(textPayload(finalExport).completionEvidence).toMatchObject({

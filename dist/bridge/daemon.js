@@ -5,7 +5,6 @@ import { config } from "../config.js";
 import { CommandDispatcher } from "./dispatcher.js";
 import { BridgeState } from "./state.js";
 import { BridgeWebSocketServer } from "./wsServer.js";
-import { startMockBridge, stopMockBridge } from "../mock/index.js";
 function parseIdleTimeout(value) {
     if (!value || !/^\d+$/.test(value.trim()))
         return null;
@@ -20,9 +19,12 @@ async function main() {
         host: config.host,
         port: config.port,
         token: config.bridgeToken,
+        allowRemote: config.remoteMode,
+        allowedRemoteIps: config.remotePeers,
     });
     let shuttingDown = false;
     let mockStarted = false;
+    let stopMockBridge = null;
     let idleTimer = null;
     const shutdown = async (signal) => {
         if (shuttingDown)
@@ -31,7 +33,7 @@ async function main() {
         logger.info(`Persistent bridge daemon received ${signal}; shutting down.`);
         if (idleTimer)
             clearInterval(idleTimer);
-        if (mockStarted)
+        if (mockStarted && stopMockBridge)
             await stopMockBridge();
         await server.close();
         process.exit(0);
@@ -41,11 +43,13 @@ async function main() {
     await server.start();
     logger.info(`Persistent Aseprite bridge daemon listening on ws://${config.host}:${config.port}.`);
     if (process.env.ASEPRITE_MCP_MOCK === "1") {
-        await startMockBridge({
+        const mockBridge = await import("../mock/index.js");
+        await mockBridge.startMockBridge({
             host: config.host,
             port: config.port,
             token: config.bridgeToken,
         });
+        stopMockBridge = mockBridge.stopMockBridge;
         mockStarted = true;
     }
     const idleTimeoutMs = parseIdleTimeout(process.env.ASEPRITE_MCP_DAEMON_IDLE_MS);

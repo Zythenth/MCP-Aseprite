@@ -26,6 +26,13 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     expect(fs.existsSync(path.resolve(rootDir, "dist/bridge/daemon.js"))).toBe(true);
   });
 
+  it("packages the daemon runtime and its WebSocket dependency inside the Aseprite extension", () => {
+    const packageScript = fs.readFileSync(path.resolve(rootDir, "scripts/package-extension.mjs"), "utf-8");
+    expect(packageScript).toContain('path.join(root, "dist", "bridge", "daemon.js")');
+    expect(packageScript).toContain('"server/node_modules/ws"');
+    expect(packageScript).toContain('"server/package.json"');
+  });
+
   it("LICENSE contains standard MIT license text, Permission clause, and copyright 2026 Zythenth", () => {
     const licensePath = path.resolve(rootDir, "LICENSE");
     expect(fs.existsSync(licensePath)).toBe(true);
@@ -155,7 +162,7 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
 
   it("README documents the complete configurable surface and in-memory review-state limitation", () => {
     const readmeContent = fs.readFileSync(path.resolve(rootDir, "README.md"), "utf-8");
-    expect(readmeContent).toContain("95 ferramentas");
+    expect(readmeContent).toContain("114 ferramentas");
     expect(readmeContent).toContain("ASEPRITE_READ_ONLY");
     expect(readmeContent).toContain("ASEPRITE_TOOLSETS");
     expect(readmeContent).toContain("export_sprite_sheet");
@@ -189,7 +196,7 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     const luaContent = fs.readFileSync(luaPath, "utf-8");
 
     expect(luaContent).not.toMatch(/WebSocketMessageType\.ERROR[\s\S]*?tostring\s*\(\s*err\s*\)/);
-    expect(luaContent).toContain('MCP server unavailable on 127.0.0.1:');
+    expect(luaContent).toContain('MCP server unavailable on " .. BRIDGE_HOST .. ":');
     expect(luaContent).not.toMatch(/dlg:modify\{[^}]*BRIDGE_TOKEN/);
   });
 

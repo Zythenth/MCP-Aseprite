@@ -62,6 +62,32 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
   });
 
   describe("Static Architectural and Contract Invariant Validations", () => {
+    it("keeps the extension dormant when Aseprite has no interactive UI", () => {
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
+      const initBridge = /local function initBridge\(\)([\s\S]*?)local dlg = Dialog\{/.exec(luaContent);
+
+      expect(initBridge).not.toBeNull();
+      expect(initBridge![1]).toContain("if not app.isUIAvailable then");
+      expect(initBridge![1]).toContain("return");
+    });
+
+    it("starts only the packaged local daemon after validating paths and leaves Node as an explicit runtime prerequisite", () => {
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
+      const initBridge = /local function initBridge\(\)([\s\S]*?)local dlg = Dialog\{/.exec(luaContent);
+
+      expect(initBridge).not.toBeNull();
+      const body = initBridge![1];
+      expect(body).toContain('"server" .. separator .. "dist" .. separator .. "bridge" .. separator .. "daemon.js"');
+      expect(body).toContain('io.open(daemonPath, "rb")');
+      expect(body).toContain('os.getenv("ASEPRITE_NODE_PATH") or "node"');
+      expect(body).toContain(String.raw`local function isShellSafePath(value)`);
+      expect(body).toContain(String.raw`if not isShellSafePath(extensionDirectory) then return false end`);
+      expect(body).toContain(String.raw`if not isShellSafePath(daemonPath) then return false end`);
+      expect(body).toContain(String.raw`if not isShellSafePath(nodeExecutable) then return false end`);
+      expect(body).toContain("start \"\" /b");
+      expect(body).toContain("state.daemonLaunchAttempted = true");
+    });
+
     it("provides a guarded Timer fallback when the native WebSocket reconnection stalls", () => {
       const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
 
@@ -71,6 +97,38 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(luaContent).toContain("state.connectionGeneration ~= generation");
       expect(luaContent).toContain("stopReconnectFallback()");
       expect(luaContent).toContain("state.reconnectEnabled = false");
+    });
+
+    it("bounds native and fallback reconnects without closing a socket inside its callback", () => {
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
+      const fallback = /local function scheduleReconnectFallback\(dlg, generation\)([\s\S]*?)end\n\ninitWebSocket/.exec(luaContent);
+
+      expect(fallback).not.toBeNull();
+      expect(fallback![1]).toContain("local staleWs = state.ws");
+      expect(fallback![1]).toContain("staleWs:close()");
+      expect(fallback![1]).toContain("initWebSocket(dlg)");
+      expect(luaContent).toContain("minreconnectwait = RECONNECT_FALLBACK_DELAY_SECONDS");
+      expect(luaContent).toContain("maxreconnectwait = 30");
+      expect(luaContent).toContain("local function deferSocketStopAndScheduleReconnect");
+      expect(luaContent).toContain("interval = 0.001");
+
+      const closeBranch = /elseif msgType == WebSocketMessageType\.CLOSE then([\s\S]*?)elseif msgType == WebSocketMessageType\.ERROR/.exec(luaContent);
+      expect(closeBranch).not.toBeNull();
+      expect(closeBranch![1]).toContain("deferSocketStopAndScheduleReconnect(dlg, generation)");
+      expect(closeBranch![1]).not.toContain(":close()");
+    });
+
+    it("uses an Aseprite-side health check to detect silent TCP peer loss", () => {
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
+      const healthCheck = /local function startBridgeHealthCheck\(dlg\)([\s\S]*?)end\n\ninitWebSocket/.exec(luaContent);
+
+      expect(healthCheck).not.toBeNull();
+      expect(healthCheck![1]).toContain("interval = 3");
+      expect(healthCheck![1]).toContain('activeWs:sendPing("aseprite-mcp-health")');
+      expect(healthCheck![1]).toContain("scheduleReconnectFallback(dlg, state.connectionGeneration)");
+      expect(healthCheck![1]).toContain("not state.reconnectTimer and not state.socketStopTimer");
+      expect(luaContent).toContain("startBridgeHealthCheck(dlg)");
+      expect(luaContent).toContain("stopBridgeHealthCheck()");
     });
 
     it("validates MAX_CHANGE_JOURNAL_ENTRIES = 128 and handlers.get_changes_since with params.sinceRevision in Lua bridge", () => {
@@ -627,7 +685,7 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       const wsErrorMatch = /WebSocketMessageType\.ERROR\s+then([\s\S]*?)(?:elseif|end)/.exec(luaContent);
       expect(wsErrorMatch).not.toBeNull();
       const wsErrorBody = wsErrorMatch![1];
-      expect(wsErrorBody).toContain('dlg:modify{ id = "status_lbl", text = "MCP server unavailable on 127.0.0.1:" .. PORT .. " (retrying...)" }');
+      expect(wsErrorBody).toContain('dlg:modify{ id = "status_lbl", text = "MCP server unavailable on " .. BRIDGE_HOST .. ":" .. PORT .. " (retrying...)" }');
       expect(wsErrorBody).not.toContain("tostring(err)");
       expect(wsErrorBody).not.toMatch(/\.\.\s*err\b/);
 

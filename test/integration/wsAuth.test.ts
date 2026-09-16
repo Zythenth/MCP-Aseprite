@@ -146,16 +146,24 @@ describe("WebSocket Bridge hello and token authentication", () => {
 
     const duplicateWs = new WebSocket(`ws://127.0.0.1:${port}`);
     clientSockets.push(duplicateWs);
-    const closeEvent = await new Promise<{ code: number; reason: string }>((resolve) => {
+    const result = await new Promise<{ code: number; reason: string; rejection?: unknown }>((resolve) => {
+      let rejection: unknown;
       duplicateWs.on("open", () => duplicateWs.send(JSON.stringify(hello(VALID_TOKEN))));
+      duplicateWs.on("message", (raw) => {
+        rejection = JSON.parse(raw.toString("utf-8"));
+      });
       duplicateWs.on("close", (code, reason) => {
-        resolve({ code, reason: reason.toString("utf-8") });
+        resolve({ code, reason: reason.toString("utf-8"), rejection });
       });
     });
 
-    expect(closeEvent).toEqual({
+    expect(result).toMatchObject({
       code: 1008,
       reason: "Another Aseprite bridge is already connected",
+    });
+    expect(result.rejection).toEqual({
+      event: "hello_rejected",
+      data: { code: "BRIDGE_BUSY", retryAfterMs: 1000 },
     });
     expect(wsServer.isConnected()).toBe(true);
     expect(dispatcher.isConnected()).toBe(true);

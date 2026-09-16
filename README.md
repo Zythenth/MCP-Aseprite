@@ -20,7 +20,7 @@ Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 - **Inspeção visual rica**: previews em PNG com escala nearest-neighbor, réguas de coordenadas e grades customizáveis.
 - **Leitura precisa de pixels**: formatos hexadecimal (`#RRGGBBAA`), RGBA, indexado e compacto otimizado para economia de tokens.
 - **Edição em lote e Undo atômico**: operações em lote agrupadas em uma única entrada de histórico de Undo.
-- **95 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, preview animado, revisão visual e análise de pixel art.
+- **114 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, preview animado, revisão visual, análise de pixel art, tween, smear, aprovação humana e exportação para engines.
 - **Estrutura nativa do Aseprite**: cels vinculados, grupos aninhados, pivôs/nine-patch, blend modes, merge/flatten e exportação avançada por tag, intervalo e camada.
 - **Ciclo visual incremental**: preview opcional após mutações, filmstrip, onion skin, comparação exata entre frames, checkpoints e histórico de alterações por revisão.
 - **Qualidade de pixel art**: lint heurístico, CIEDE2000, análise de paleta, rampas com hue shift e dithering Bayer determinístico.
@@ -40,11 +40,14 @@ Cliente MCP (Gemini / Claude / outros)
     |
     | MCP sobre stdio
     v
-Aseprite MCP Server (Node.js/TypeScript; protocolo bridge 1.x)
+Aseprite MCP Server (Node.js/TypeScript)
     |
-    | WebSocket JSON-RPC em 127.0.0.1:32123 (com auth opcional)
+    | par autenticado do daemon local
     v
-Bridge Lua (aseprite-bridge.lua)
+Daemon persistente (Node.js; loopback por padrão)
+    ^
+    | iniciado pela extensão empacotada
+Bridge Lua no Aseprite (aseprite-bridge.lua)
     |
     v
 Documento ativo no Aseprite
@@ -65,6 +68,14 @@ O servidor registra as ferramentas MCP, valida parâmetros de entrada e encaminh
 
 ## Instalação rápida
 
+### Usuário final: extensão recomendada
+
+No Aseprite, abra **Edit > Preferences > Extensions > Add Extension** e selecione o arquivo `aseprite-mcp-bridge.aseprite-extension` distribuído com o projeto. Ao abrir o editor, a extensão inicia o bridge e o daemon local empacotado; a janela do editor passa por `Starting bundled MCP server`, `Connecting` e `Connected`.
+
+Isso elimina copiar o Lua e abrir um terminal para iniciar o bridge. O Node.js continua necessário como runtime local, e o cliente de IA ainda precisa apontar para `dist/index.js` uma vez, conforme a seção de configuração do cliente MCP.
+
+### Desenvolver ou empacotar a extensão
+
 Clone o repositório e navegue até a pasta:
 
 ```bash
@@ -72,7 +83,7 @@ git clone https://github.com/Zythenth/MCP-Aseprite.git
 cd MCP-Aseprite
 ```
 
-### Windows (Automático)
+### Windows (instalação de desenvolvimento ou script legado)
 
 No PowerShell:
 
@@ -102,6 +113,14 @@ O ponto de entrada compilado será gerado em `dist/index.js`.
 ---
 
 ## Instalação do Bridge no Aseprite
+
+### Extensão em um clique (recomendado)
+
+Para gerar o pacote a partir do código-fonte, execute `npm run build` e `npm run package:extension`. O resultado é `dist/aseprite-mcp-bridge.aseprite-extension`. No Aseprite, use **Edit > Preferences > Extensions > Add Extension** e selecione esse arquivo. A extensão inclui o daemon compilado e a dependência WebSocket, inicia-o localmente quando o editor abre e mantém uma pequena janela com `Starting bundled MCP server`, `Connecting`, `Connected` ou reconexão. Não é necessário copiar Lua nem abrir um terminal para iniciar o bridge.
+
+> A extensão não baixa executáveis: o runtime Node.js já instalado continua sendo um requisito. Use `ASEPRITE_NODE_PATH` somente se `node` não estiver no `PATH`. O daemon inicia no host/porta já configurados e permanece em loopback por padrão; ela não abre portas públicas.
+
+### Script avulso (legado)
 
 Caso o script não tenha sido copiado automaticamente pelo instalador:
 
@@ -175,6 +194,19 @@ Exemplo enxuto para um agente revisor:
 .\start.ps1 -ReadOnly -Toolsets visual,palette,animation,pixel-art,review
 ```
 
+### 4. Agente em VM, WSL ou LAN privada
+
+O padrão é sempre loopback. Para um agente em VM/WSL/LAN, habilite explicitamente `ASEPRITE_REMOTE_MODE=true`, use um `ASEPRITE_HOST` IPv4 privado (somente `10/8`, `172.16/12` ou `192.168/16`), um token de pelo menos 32 caracteres e uma allowlist de IPs privados em `ASEPRITE_REMOTE_PEERS`. O bridge rejeita bind público, wildcard e DNS, e o daemon rejeita qualquer cliente que não esteja na allowlist mesmo com token válido.
+
+```powershell
+$env:ASEPRITE_REMOTE_MODE = "true"
+$env:ASEPRITE_HOST = "192.168.1.10"
+$env:ASEPRITE_REMOTE_PEERS = "192.168.1.42"
+$env:ASEPRITE_BRIDGE_TOKEN = "gere-um-token-url-safe-com-pelo-menos-32-caracteres"
+```
+
+Não configure encaminhamento de porta no roteador. Para redes fora da LAN, use uma VPN privada que forneça endereços privados e inclua o IP do agente na allowlist.
+
 ### 4. Limites operacionais
 
 O servidor limita payloads do bridge, comandos pendentes, dimensões de canvas, pixels por lote, frames de filmstrip/spritesheet, tamanho do checkpoint e cardinalidade da análise de paleta. Esses limites são proteções contra consumo acidental de memória/CPU; não constituem uma sandbox para processos locais já comprometidos.
@@ -244,7 +276,7 @@ Crie uma animação no Aseprite usando exclusivamente as ferramentas aseprite/.
 A skill proíbe o uso de Python, terminal e scripts auxiliares para gerar pixels, exige edição por coordenadas explícitas, preview, análise temporal, revisão e verificação dos arquivos finais. Ela complementa as instruções enviadas automaticamente pelo próprio servidor MCP.
 
 > [!IMPORTANT]
-> **Várias conversas compartilham o mesmo bridge persistente.** Cada cliente stdio mantém sua própria sessão MCP e se conecta a um daemon local iniciado automaticamente pela primeira conversa. O daemon permanece ativo depois que as conversas terminam, portanto o socket do Aseprite não é derrubado quando uma tarefa fecha. Novas conversas apenas entram como pares e reutilizam a conexão existente. Uma porta ocupada por outro programa ou um token divergente continua sendo rejeitada e reavaliada automaticamente.
+> **Várias conversas compartilham o mesmo bridge persistente.** A extensão inicia o daemon local ao abrir o Aseprite; cada cliente stdio mantém sua própria sessão MCP e entra como par desse daemon. O daemon permanece ativo depois que as conversas terminam, portanto o socket do Aseprite não é derrubado quando uma tarefa fecha. Novas conversas apenas reutilizam a conexão existente. Uma porta ocupada por outro programa ou um token divergente continua sendo rejeitada e reavaliada automaticamente.
 
 ---
 
@@ -335,6 +367,9 @@ O conjunto completo contém **114 ferramentas únicas**. Para reduzir o contexto
 - O workflow estruturado registra a referência carregada e sua análise, plano e key poses, preview da revisão atual, revisão das poses, autoavaliação nas 22 categorias e QA independente (`reviewerId` diferente de `authorId`).
 - `analyze_animation_temporal` produz achados temporais determinísticos e limitados, com hash da seleção/revisão analisada.
 - Qualquer mutação invalida previews e revisões anteriores. Achados críticos abertos, achados altos não tratados, QA ausente/reprovada ou evidência obsoleta impedem a conclusão.
+- `create_pixel_art_tween` gera intermediários entre duas poses-chave movendo clusters 4-conectados da mesma cor; não mistura alfa, redimensiona ou suaviza pixels. Os frames produzidos exigem inspeção com `get_canvas`, preview temporal e QA.
+- `create_smear_frame` insere um único frame de smear nítido entre keyframes normais, calculando a direção a partir dos limites ocupados e preservando as poses original e final.
+- `request_human_approval` abre um diálogo nativo no Aseprite com preview, `Aprovar`, `Pedir alterações` e `Rejeitar`. O recibo aprovado pode ser exigido antes de um export final.
 
 ### Arquivos e exportação
 
@@ -343,6 +378,8 @@ O conjunto completo contém **114 ferramentas únicas**. Para reduzir o contexto
 - `new_sprite`, `open_sprite`, `save_sprite`, `save_sprite_as`, `save_project`, `export_png`, `resize_canvas`.
 - `export_sprite_sheet`: exporta por tag ou intervalo explícito, filtra camadas e organiza frames horizontalmente, verticalmente ou em grade, respeitando direção da tag, escala, espaçamento e no-clobber.
 - `export_animation`: exporta a ordem efetiva de uma tag ou intervalo como GIF, spritesheet, sequência PNG ou PNG único. A sequência PNG usa nomes determinísticos e remove arquivos novos já escritos se uma execução no-clobber falhar parcialmente. Com `final: true`, o gate é aplicado quando o workflow ativo exige conclusão estrita ou quando `strictWorkflowValidation: true`; o resultado aceito inclui evidência compacta vinculada à revisão, preview, revisão das poses, autoavaliação e QA atuais.
+- `export_engine_assets`: gera um spritesheet PNG, `SpriteFrames` do Godot (`.tres`) e metadata de importação Unity (`.engine.json`), preservando tags, durações, pivô de slice e eventos declarados.
+- `batch_export_sprites`: processa até 256 arquivos `.ase`/`.aseprite` sob um diretório autorizado, exporta PNG ou spritesheet em escalas inteiras (por exemplo, 1x/2x/4x), aplica no-clobber e restaura o documento original salvo.
 - APNG é rejeitado antes de qualquer comando ao bridge; nenhum PNG estático é apresentado falsamente como APNG. A decisão é intencional: a [documentação oficial de exportação](https://www.aseprite.org/docs/exporting/), a [CLI oficial](https://www.aseprite.org/docs/cli/) e o [registro atual de formatos do Aseprite](https://github.com/aseprite/aseprite/blob/main/src/app/file/file_formats_manager.cpp) não expõem um encoder APNG. Adicionar um encoder Node de terceiros ampliaria a superfície de dependências e manutenção sem suporte nativo verificável; a interface mantém `apng` apenas para retornar uma incompatibilidade explícita e estável.
 
 Ferramentas destrutivas exigem `confirm: true`; gravações em caminho existente exigem `overwrite: true`. Mutações com `returnPreview: true` retornam a imagem como conteúdo MCP sem repetir o base64 no bloco textual.
@@ -362,7 +399,7 @@ Ferramentas destrutivas exigem `confirm: true`; gravações em caminho existente
 ## Solução de problemas
 
 ### O bridge permanece desconectado no Aseprite
-1. Confirme que o servidor MCP está em execução.
+1. Confirme que a extensão está instalada e que o diálogo exibiu `Connected`. Ela inicia o daemon local automaticamente ao abrir o Aseprite.
 2. Verifique se a porta coincide (`ASEPRITE_PORT`, padrão `32123`).
 3. Se você configurou `ASEPRITE_BRIDGE_TOKEN` no servidor MCP, confirme que a mesma variável foi definida no ambiente do Aseprite e que o Aseprite foi reiniciado.
 4. Tentativas com token divergente são rejeitadas com o código `1008 (Invalid bridge authentication)`.

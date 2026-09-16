@@ -1,7 +1,7 @@
 -- ==============================================================================
 -- Aseprite MCP Bridge Script (lua/aseprite-bridge.lua)
 -- Compatible with Aseprite v1.2.30+ and v1.3+
--- Full-duplex JSON-RPC command bridge over WebSocket on 127.0.0.1:32123
+-- Full-duplex JSON-RPC command bridge over a loopback or explicitly allowlisted private WebSocket target
 -- ==============================================================================
 
 local DEFAULT_PORT = 32123
@@ -45,7 +45,27 @@ end
 
 local BRIDGE_TOKEN = parseEnvToken()
 local AUTH_ENABLED = (BRIDGE_TOKEN ~= nil and #BRIDGE_TOKEN > 0)
-local WS_BASE_URL = "ws://127.0.0.1:" .. PORT
+local function isPrivateIpv4(value)
+  local a, b, c, d = value:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  if not a then return false end
+  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+  if not a or not b or not c or not d or a > 255 or b > 255 or c > 255 or d > 255 then return false end
+  return a == 10 or (a == 172 and b >= 16 and b <= 31) or (a == 192 and b == 168)
+end
+
+local function parseBridgeHost()
+  local raw = os.getenv("ASEPRITE_HOST")
+  if not raw then return "127.0.0.1", false end
+  local host = raw:match("^%s*(.-)%s*$")
+  if host == "127.0.0.1" or host == "localhost" or host == "::1" then return host, false end
+  local remoteMode = os.getenv("ASEPRITE_REMOTE_MODE")
+  local enabled = remoteMode and (remoteMode:lower() == "1" or remoteMode:lower() == "true" or remoteMode:lower() == "yes" or remoteMode:lower() == "on")
+  if enabled and BRIDGE_TOKEN and #BRIDGE_TOKEN >= 32 and isPrivateIpv4(host) then return host, true end
+  return "127.0.0.1", false
+end
+
+local BRIDGE_HOST, REMOTE_MODE = parseBridgeHost()
+local WS_BASE_URL = "ws://" .. BRIDGE_HOST .. ":" .. PORT
 local WS_URL = WS_BASE_URL
 
 local MAX_PIXELS_BATCH = 100000
@@ -493,6 +513,14 @@ if _G.__ASEPRITE_MCP_BRIDGE then
     pcall(function() oldState.reconnectTimer:stop() end)
     oldState.reconnectTimer = nil
   end
+  if oldState.socketStopTimer then
+    pcall(function() oldState.socketStopTimer:stop() end)
+    oldState.socketStopTimer = nil
+  end
+  if oldState.healthTimer then
+    pcall(function() oldState.healthTimer:stop() end)
+    oldState.healthTimer = nil
+  end
   if oldState.sitechangeListenerId then
     pcall(function() app.events:off(oldState.sitechangeListenerId) end)
     oldState.sitechangeListenerId = nil
@@ -531,7 +559,11 @@ state.lastLayerId = nil
 state.connectionGeneration = 0
 state.reconnectEnabled = true
 state.reconnectTimer = nil
+state.socketStopTimer = nil
 state.wsOpen = false
+state.healthTimer = nil
+state.healthCheckCount = 0
+state.daemonLaunchAttempted = false
 
 -- ------------------------------------------------------------------------------
 -- Helper: Color & Hex Conversions (Mode-Aware Native and Protocol RGBA)
@@ -652,16 +684,19 @@ end
 -- ------------------------------------------------------------------------------
 local b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 local function base64Encode(data)
-  return ((data:gsub('.', function(x)
-    local r, b = '', x:byte()
-    for i = 8, 1, -1 do r = r .. (b % 2^i - b % 2^(i-1) > 0 and '1' or '0') end
-    return r
-  end) .. '0000'):gsub('%d%d%d?%d?%d?', function(x)
-    if #x < 6 then return '' end
-    local c = 0
-    for i = 1, 6 do c = c + (x:sub(i, i) == '1' and 2^(6-i) or 0) end
-    return b64chars:sub(c + 1, c + 1)
-  end) .. ({ '', '==', '=' })[#data % 3 + 1])
+  if type(data) ~= "string" or #data == 0 then return "" end
+  local encoded = {}
+  for index = 1, #data, 3 do
+    local first = data:byte(index)
+    local second = data:byte(index + 1)
+    local third = data:byte(index + 2)
+    local group = first * 65536 + (second or 0) * 256 + (third or 0)
+    encoded[#encoded + 1] = b64chars:sub(math.floor(group / 262144) % 64 + 1, math.floor(group / 262144) % 64 + 1)
+    encoded[#encoded + 1] = b64chars:sub(math.floor(group / 4096) % 64 + 1, math.floor(group / 4096) % 64 + 1)
+    encoded[#encoded + 1] = second and b64chars:sub(math.floor(group / 64) % 64 + 1, math.floor(group / 64) % 64 + 1) or "="
+    encoded[#encoded + 1] = third and b64chars:sub(group % 64 + 1, group % 64 + 1) or "="
+  end
+  return table.concat(encoded)
 end
 
 -- ------------------------------------------------------------------------------
@@ -757,6 +792,11 @@ local function renderAnimationGif(params)
   local originalFrameNumber = app.frame and app.frame.frameNumber or 1
   local originalLayer = app.layer
   local previewSprite = nil
+  local previousExecutingState = state.isExecutingMcp
+  -- Aseprite makes the temporary preview document active while it is built.
+  -- Keep its Sprite.change notifications out of the source-document revision
+  -- journal; the source is read-only for the entire GIF render operation.
+  state.isExecutingMcp = true
   local function closePreviewAndRestoreSource()
     if previewSprite then
       local closed = pcall(function() previewSprite:close() end)
@@ -862,6 +902,7 @@ local function renderAnimationGif(params)
   end)
 
   closePreviewAndRestoreSource()
+  state.isExecutingMcp = previousExecutingState
   if temporary then pcall(function() os.remove(outputPath) end) end
   if not ok then error(resultOrError) end
   return resultOrError
@@ -1067,6 +1108,9 @@ handlers.aseprite_status = function(params)
     framesCount = spr and #spr.frames or 0,
     activeLayer = (spr and app.layer) and app.layer.name or "",
     activeFrame = (spr and app.frame) and app.frame.frameNumber or 1,
+    bridgeTarget = WS_BASE_URL,
+    remoteMode = REMOTE_MODE,
+    healthCheckCount = state.healthCheckCount,
     revision = state.revision
   }
 end
@@ -4246,8 +4290,58 @@ local function stopReconnectFallback()
   end
 end
 
+local function stopDeferredSocketClose()
+  if state.socketStopTimer then
+    pcall(function() state.socketStopTimer:stop() end)
+    state.socketStopTimer = nil
+  end
+end
+
+local function stopBridgeHealthCheck()
+  if state.healthTimer then
+    pcall(function() state.healthTimer:stop() end)
+    state.healthTimer = nil
+  end
+end
+
+handlers.show_human_approval = function(params)
+  if not app.isUIAvailable then error("Human approval requires an interactive Aseprite UI.") end
+  local spr = app.sprite
+  if not spr then error("No active sprite open in Aseprite.") end
+  local frame = resolveTargetFrame(spr, params.frameNumber)
+  local decision = "rejected"
+  local preview = renderFrameImage(spr, frame.frameNumber)
+  local dlg = Dialog{ title = params.title or "Aprovação de exportação" }
+  dlg:label{ text = params.summary or "Revise a prévia antes de decidir." }
+  local previewAdded = pcall(function()
+    dlg:canvas{
+      id = "approval_preview",
+      width = math.min(preview.width, 512),
+      height = math.min(preview.height, 512),
+      onpaint = function(ev)
+        ev.context:drawImage(preview, 0, 0)
+      end
+    }
+  end)
+  if not previewAdded then
+    dlg:label{ text = "Prévia indisponível nesta versão do Aseprite; revise o frame ativo no canvas." }
+  end
+  dlg:entry{ id = "feedback", label = "Feedback:", text = "" }
+  dlg:button{ text = "Aprovar", onclick = function() decision = "approved"; dlg:close() end }
+  dlg:button{ text = "Pedir alterações", onclick = function() decision = "changes_requested"; dlg:close() end }
+  dlg:button{ text = "Rejeitar", onclick = function() decision = "rejected"; dlg:close() end }
+  dlg:show{ wait = true }
+  return {
+    decision = decision,
+    feedback = dlg.data.feedback or "",
+    frameNumber = frame.frameNumber,
+    previewShown = previewAdded,
+    revision = state.revision
+  }
+end
+
 local function scheduleReconnectFallback(dlg, generation)
-  if not state.reconnectEnabled or state.connectionGeneration ~= generation or state.authenticated or state.wsOpen then
+  if not state.reconnectEnabled or state.connectionGeneration ~= generation or state.authenticated then
     return
   end
 
@@ -4260,7 +4354,16 @@ local function scheduleReconnectFallback(dlg, generation)
       if state.reconnectTimer == timer then
         state.reconnectTimer = nil
       end
-      if state.reconnectEnabled and state.connectionGeneration == generation and not state.authenticated and not state.wsOpen then
+      if state.reconnectEnabled and state.connectionGeneration == generation and not state.authenticated then
+        -- Do not stop the socket from its onreceive callback: in Aseprite 1.3
+        -- that callback is dispatched by the WebSocket's own UI timer. Closing
+        -- there can prevent the deferred recovery from ever running. The
+        -- fallback timer is outside that callback and bounds each replacement.
+        local staleWs = state.ws
+        state.ws = nil
+        if staleWs then
+          pcall(function() staleWs:close() end)
+        end
         initWebSocket(dlg)
       end
     end
@@ -4269,24 +4372,108 @@ local function scheduleReconnectFallback(dlg, generation)
   timer:start()
 end
 
+-- ixwebsocket retries a successful-but-immediately-rejected connection without
+-- applying its normal failed-connect delay. Do not call close() directly from
+-- onreceive: Aseprite dispatches that callback from the socket's UI timer.
+-- Deferring the stop by one UI tick shuts down that native retry loop safely,
+-- then the guarded fallback below owns the next attempt.
+local function deferSocketStopAndScheduleReconnect(dlg, generation)
+  if not state.reconnectEnabled or state.connectionGeneration ~= generation or state.socketStopTimer then
+    return
+  end
+
+  local timer
+  timer = Timer{
+    interval = 0.001,
+    ontick = function()
+      pcall(function() timer:stop() end)
+      if state.socketStopTimer == timer then
+        state.socketStopTimer = nil
+      end
+      if not state.reconnectEnabled or state.connectionGeneration ~= generation or state.authenticated then
+        return
+      end
+
+      local activeWs = state.ws
+      state.ws = nil
+      if activeWs then
+        pcall(function() activeWs:close() end)
+      end
+      scheduleReconnectFallback(dlg, generation)
+    end
+  }
+  state.socketStopTimer = timer
+  timer:start()
+end
+
+-- A TCP peer can disappear without an immediate CLOSE/ERROR notification on
+-- some Aseprite 1.3 builds. A small ping from Aseprite makes that failure
+-- observable, while the existing guarded fallback performs the replacement.
+local function startBridgeHealthCheck(dlg)
+  if state.healthTimer then
+    return
+  end
+
+  local timer
+  timer = Timer{
+    interval = 3,
+    ontick = function()
+      if not state.reconnectEnabled or state.dialog ~= dlg then
+        pcall(function() timer:stop() end)
+        if state.healthTimer == timer then
+          state.healthTimer = nil
+        end
+        return
+      end
+
+      state.healthCheckCount = state.healthCheckCount + 1
+      if not state.authenticated then
+        if not state.reconnectTimer and not state.socketStopTimer then
+          scheduleReconnectFallback(dlg, state.connectionGeneration)
+        end
+        return
+      end
+
+      local activeWs = state.ws
+      local pinged = activeWs and pcall(function()
+        activeWs:sendPing("aseprite-mcp-health")
+      end)
+      if not pinged then
+        state.wsOpen = false
+        state.authenticated = false
+        if not state.reconnectTimer and not state.socketStopTimer then
+          scheduleReconnectFallback(dlg, state.connectionGeneration)
+        end
+      end
+    end
+  }
+  state.healthTimer = timer
+  timer:start()
+end
+
 initWebSocket = function(dlg)
   stopReconnectFallback()
+  stopDeferredSocketClose()
   state.reconnectEnabled = true
   state.connectionGeneration = state.connectionGeneration + 1
   local generation = state.connectionGeneration
   state.wsOpen = false
+  state.authenticated = false
   local previousWs = state.ws
+  state.ws = nil
   if previousWs then
     pcall(function() previousWs:close() end)
   end
 
-  dlg:modify{ id = "status_lbl", text = "Connecting to 127.0.0.1:" .. PORT .. "..." }
+  dlg:modify{ id = "status_lbl", text = "Connecting to " .. BRIDGE_HOST .. ":" .. PORT .. "..." }
 
   state.ws = WebSocket{
     url = WS_URL,
     deflate = false,
-    minreconnectwait = 1,
-    maxreconnectwait = 5,
+    -- ixwebsocket may retry on its own before the fallback runs. Keep that
+    -- retry bounded too, so a deliberate server rejection cannot busy-loop.
+    minreconnectwait = RECONNECT_FALLBACK_DELAY_SECONDS,
+    maxreconnectwait = 30,
     onreceive = function(msgType, data, err)
       if state.connectionGeneration ~= generation then
         return
@@ -4294,7 +4481,6 @@ initWebSocket = function(dlg)
         local authStatus = AUTH_ENABLED and "enabled" or "disabled"
         state.wsOpen = true
         state.authenticated = false
-        stopReconnectFallback()
         dlg:modify{ id = "status_lbl", text = "Authenticating (" .. PORT .. ")..." }
         local hello = {
           event = "hello",
@@ -4312,6 +4498,7 @@ initWebSocket = function(dlg)
               layerEvents = true,
               animationGif = true,
               animationInspection = true,
+              humanApproval = true,
               referenceImageDecode = true,
               safeJson = true,
               timelineEditing = true
@@ -4321,19 +4508,21 @@ initWebSocket = function(dlg)
         local sent = pcall(function() state.ws:sendText(bridgeJson.encode(hello)) end)
         if not sent then
           dlg:modify{ id = "status_lbl", text = "Handshake failed (check server logs)" }
+          state.wsOpen = false
+          deferSocketStopAndScheduleReconnect(dlg, generation)
         end
 
       elseif msgType == WebSocketMessageType.CLOSE then
         state.wsOpen = false
         state.authenticated = false
         dlg:modify{ id = "status_lbl", text = "Disconnected (Reconnecting...)" }
-        scheduleReconnectFallback(dlg, generation)
+        deferSocketStopAndScheduleReconnect(dlg, generation)
 
       elseif msgType == WebSocketMessageType.ERROR then
         state.wsOpen = false
         state.authenticated = false
-        dlg:modify{ id = "status_lbl", text = "MCP server unavailable on 127.0.0.1:" .. PORT .. " (retrying...)" }
-        scheduleReconnectFallback(dlg, generation)
+        dlg:modify{ id = "status_lbl", text = "MCP server unavailable on " .. BRIDGE_HOST .. ":" .. PORT .. " (retrying...)" }
+        deferSocketStopAndScheduleReconnect(dlg, generation)
 
       elseif msgType == WebSocketMessageType.TEXT then
         local ok, req = pcall(bridgeJson.decode, data)
@@ -4350,13 +4539,15 @@ initWebSocket = function(dlg)
             local authStatus = AUTH_ENABLED and "enabled" or "disabled"
             local syncStatus = req.data.resyncRequired and "resync required" or "in sync"
             dlg:modify{ id = "status_lbl", text = "Connected (" .. PORT .. ") [" .. syncStatus .. "]" }
-            app.tip("Connected to MCP Server (127.0.0.1:" .. PORT .. ") [Auth: " .. authStatus .. "]", 3)
+            app.tip("Connected to MCP Server (" .. BRIDGE_HOST .. ":" .. PORT .. ") [Auth: " .. authStatus .. "]", 3)
           else
             dlg:modify{ id = "status_lbl", text = "Incompatible bridge protocol" }
-            pcall(function() state.ws:close() end)
+            state.wsOpen = false
+            deferSocketStopAndScheduleReconnect(dlg, generation)
           end
         elseif not state.authenticated then
-          pcall(function() state.ws:close() end)
+          state.wsOpen = false
+          deferSocketStopAndScheduleReconnect(dlg, generation)
         elseif req.id and req.command and handlers[req.command] then
           local success, resultOrErr = pcall(handlers[req.command], req.params or {})
           local response = { id = req.id, success = success }
@@ -4388,6 +4579,51 @@ initWebSocket = function(dlg)
 end
 
 local function initBridge()
+  if state.dialog then
+    return
+  end
+  -- Extensions are also discovered by headless CLI invocations. There is no
+  -- Dialog object in that mode, so leave the bridge dormant instead of
+  -- failing extension initialization. A normal interactive editor calls this
+  -- function again through init(plugin) and starts the connection there.
+  if not app.isUIAvailable then
+    return
+  end
+  local function startBundledDaemon()
+    if state.daemonLaunchAttempted then return false end
+    state.daemonLaunchAttempted = true
+
+    local sourceInfo = debug.getinfo(1, "S")
+    local sourcePath = sourceInfo and sourceInfo.source or ""
+    if sourcePath:sub(1, 1) == "@" then sourcePath = sourcePath:sub(2) end
+    local extensionDirectory = sourcePath:match("^(.*)[/\\\\][^/\\\\]+$")
+    if not extensionDirectory or extensionDirectory == "" then return false end
+
+    local function isShellSafePath(value)
+      return type(value) == "string" and #value > 0 and #value <= 1024 and value:match("^[%w%s%._%-%:%/\\\\]+$") ~= nil
+    end
+    if not isShellSafePath(extensionDirectory) then return false end
+
+    local separator = package.config:sub(1, 1)
+    local daemonPath = extensionDirectory .. separator .. "server" .. separator .. "dist" .. separator .. "bridge" .. separator .. "daemon.js"
+    if not isShellSafePath(daemonPath) then return false end
+    local daemonFile = io.open(daemonPath, "rb")
+    if not daemonFile then return false end
+    daemonFile:close()
+
+    local nodeExecutable = os.getenv("ASEPRITE_NODE_PATH") or "node"
+    if not isShellSafePath(nodeExecutable) then return false end
+    local command
+    if separator == "\\" then
+      command = 'start "" /b "' .. nodeExecutable .. '" "' .. daemonPath .. '" >NUL 2>NUL'
+    else
+      command = '"' .. nodeExecutable .. '" "' .. daemonPath .. '" >/dev/null 2>&1 &'
+    end
+    local ok, result = pcall(os.execute, command)
+    return ok and result ~= nil and result ~= false
+  end
+
+  local launchedBundledDaemon = startBundledDaemon()
   local dlg = Dialog{
     title = "Aseprite MCP Bridge",
     onclose = function()
@@ -4395,6 +4631,8 @@ local function initBridge()
       state.connectionGeneration = state.connectionGeneration + 1
       state.wsOpen = false
       stopReconnectFallback()
+      stopDeferredSocketClose()
+      stopBridgeHealthCheck()
       if state.sitechangeListenerId then
         pcall(function() app.events:off(state.sitechangeListenerId) end)
         state.sitechangeListenerId = nil
@@ -4418,7 +4656,7 @@ local function initBridge()
 
   local authStatus = AUTH_ENABLED and "enabled" or "disabled"
   local portNote = PORT_FALLBACK and " (fallback default)" or ""
-  dlg:label{ id = "status_lbl", label = "Status:", text = "Connecting..." }
+  dlg:label{ id = "status_lbl", label = "Status:", text = launchedBundledDaemon and "Starting bundled MCP server..." or "Connecting..." }
   dlg:label{ id = "port_lbl", label = "Target:", text = WS_BASE_URL .. portNote .. " [Auth: " .. authStatus .. "]" }
   dlg:button{ id = "reconnect_btn", text = "Reconnect", onclick = function()
     state.connectionGeneration = state.connectionGeneration + 1
@@ -4432,6 +4670,7 @@ local function initBridge()
   dlg:show{ wait = false }
   state.dialog = dlg
   initWebSocket(dlg)
+  startBridgeHealthCheck(dlg)
 end
 
 -- ------------------------------------------------------------------------------
@@ -4541,3 +4780,16 @@ end
 
 -- Launch bridge
 initBridge()
+
+-- Aseprite calls init() when this file is contributed by an extension. The
+-- idempotent guard in initBridge keeps the direct File > Scripts behavior
+-- intact while allowing the packaged extension to reconnect on editor startup.
+function init(plugin)
+  initBridge()
+end
+
+function exit(plugin)
+  if state.dialog then
+    state.dialog:close()
+  end
+end

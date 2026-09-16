@@ -28,6 +28,7 @@ import {
 } from "../animationSelection.js";
 import { bridgeToolResult } from "./common.js";
 import type { AnimationWorkflowState, CompactCompletionEvidence } from "../animationWorkflowState.js";
+import type { ApprovalState } from "../approvalState.js";
 
 const MAX_REFERENCE_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_REFERENCE_DIMENSION = 4096;
@@ -198,7 +199,8 @@ export function registerFileTools(
   server: McpServer,
   dispatcher: CommandDispatcher,
   stateTracker: BridgeState,
-  workflowState?: AnimationWorkflowState
+  workflowState?: AnimationWorkflowState,
+  approvalState?: ApprovalState
 ): void {
   // 1. new_sprite
   server.tool(
@@ -717,6 +719,7 @@ export function registerFileTools(
       overwrite: z.boolean().optional().default(false),
       final: z.boolean().optional().default(false).describe("Whether this export represents final delivery gated by animation workflow completion"),
       strictWorkflowValidation: z.boolean().optional().default(false).describe("Whether strict workflow validation is enforced"),
+      humanApprovalId: z.string().uuid().optional().describe("Approved receipt returned by request_human_approval; required for final exports"),
     },
     async (params: {
       format: "gif" | "sprite_sheet" | "png_sequence" | "png" | "apng";
@@ -736,6 +739,7 @@ export function registerFileTools(
       overwrite?: boolean;
       final?: boolean;
       strictWorkflowValidation?: boolean;
+      humanApprovalId?: string;
     }) => {
       try {
         const tagName = normalizeTagName(params.tagName, params.tag);
@@ -829,6 +833,13 @@ export function registerFileTools(
           completionEvidence = evidence;
         }
 
+        if (isFinal && !approvalState) {
+          throw new Error("Final export approval gate is unavailable; restart the MCP server with the bundled tools.");
+        }
+        const humanApproval = isFinal
+          ? approvalState!.validate(params.humanApprovalId, stateTracker.getSessionId(), stateTracker.getRevision())
+          : undefined;
+
         const capabilities = stateTracker.getCapabilities();
         if (!capabilities.animationInspection) {
           throw new Error("The connected Aseprite bridge cannot inspect animations. Reinstall the bundled Lua bridge.");
@@ -885,6 +896,7 @@ export function registerFileTools(
             scale,
             overwrite,
             ...(completionEvidence ? { completionEvidence } : {}),
+            ...(humanApproval ? { humanApproval } : {}),
           }, null, 2) }] };
         }
 
@@ -912,6 +924,7 @@ export function registerFileTools(
             format: params.format,
             playback,
             ...(completionEvidence ? { completionEvidence } : {}),
+            ...(humanApproval ? { humanApproval } : {}),
           }, null, 2) }] };
         }
 
@@ -930,6 +943,7 @@ export function registerFileTools(
             playback,
             sourceFrame,
             ...(completionEvidence ? { completionEvidence } : {}),
+            ...(humanApproval ? { humanApproval } : {}),
           }, null, 2) }] };
         }
 
@@ -947,6 +961,7 @@ export function registerFileTools(
           format: params.format,
           playback,
           ...(completionEvidence ? { completionEvidence } : {}),
+          ...(humanApproval ? { humanApproval } : {}),
         }, null, 2) }] };
       } catch (error: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: error.message }, null, 2) }], isError: true };

@@ -168,7 +168,7 @@ function requireFileStem(value) {
         throw new Error("baseName must not include a file extension.");
     return stem;
 }
-export function registerFileTools(server, dispatcher, stateTracker, workflowState) {
+export function registerFileTools(server, dispatcher, stateTracker, workflowState, approvalState) {
     // 1. new_sprite
     server.tool("new_sprite", "Creates a new blank sprite document in Aseprite with specified dimensions and color mode.", {
         width: z.number().int().positive().max(4096).default(32).describe("Canvas width in pixels"),
@@ -619,6 +619,7 @@ export function registerFileTools(server, dispatcher, stateTracker, workflowStat
         overwrite: z.boolean().optional().default(false),
         final: z.boolean().optional().default(false).describe("Whether this export represents final delivery gated by animation workflow completion"),
         strictWorkflowValidation: z.boolean().optional().default(false).describe("Whether strict workflow validation is enforced"),
+        humanApprovalId: z.string().uuid().optional().describe("Approved receipt returned by request_human_approval; required for final exports"),
     }, async (params) => {
         try {
             const tagName = normalizeTagName(params.tagName, params.tag);
@@ -696,6 +697,12 @@ export function registerFileTools(server, dispatcher, stateTracker, workflowStat
                 }
                 completionEvidence = evidence;
             }
+            if (isFinal && !approvalState) {
+                throw new Error("Final export approval gate is unavailable; restart the MCP server with the bundled tools.");
+            }
+            const humanApproval = isFinal
+                ? approvalState.validate(params.humanApprovalId, stateTracker.getSessionId(), stateTracker.getRevision())
+                : undefined;
             const capabilities = stateTracker.getCapabilities();
             if (!capabilities.animationInspection) {
                 throw new Error("The connected Aseprite bridge cannot inspect animations. Reinstall the bundled Lua bridge.");
@@ -757,6 +764,7 @@ export function registerFileTools(server, dispatcher, stateTracker, workflowStat
                                 scale,
                                 overwrite,
                                 ...(completionEvidence ? { completionEvidence } : {}),
+                                ...(humanApproval ? { humanApproval } : {}),
                             }, null, 2) }] };
             }
             if (params.outputDirectory || params.baseName) {
@@ -784,6 +792,7 @@ export function registerFileTools(server, dispatcher, stateTracker, workflowStat
                                 format: params.format,
                                 playback,
                                 ...(completionEvidence ? { completionEvidence } : {}),
+                                ...(humanApproval ? { humanApproval } : {}),
                             }, null, 2) }] };
             }
             const outputPath = validateExportPngPath(params.outputPath, overwrite, roots, true, projectRoot);
@@ -801,6 +810,7 @@ export function registerFileTools(server, dispatcher, stateTracker, workflowStat
                                 playback,
                                 sourceFrame,
                                 ...(completionEvidence ? { completionEvidence } : {}),
+                                ...(humanApproval ? { humanApproval } : {}),
                             }, null, 2) }] };
             }
             const result = await dispatcher.send("export_sprite_sheet", {
@@ -817,6 +827,7 @@ export function registerFileTools(server, dispatcher, stateTracker, workflowStat
                             format: params.format,
                             playback,
                             ...(completionEvidence ? { completionEvidence } : {}),
+                            ...(humanApproval ? { humanApproval } : {}),
                         }, null, 2) }] };
         }
         catch (error) {

@@ -8,6 +8,7 @@ import {
   ANIMATION_WORKFLOW_22_CATEGORIES,
 } from "../../src/mcp/animationWorkflowState.js";
 import { registerFileTools } from "../../src/mcp/tools/files.js";
+import { ApprovalState } from "../../src/mcp/approvalState.js";
 
 function parseText(result: any): any {
   return JSON.parse(result.content.find((entry: any) => entry.type === "text").text);
@@ -24,6 +25,7 @@ describe("export_animation", () => {
   let failSequenceAt: number | null;
   let stateTracker: BridgeState;
   let workflowState: AnimationWorkflowState;
+  let approvalState: ApprovalState;
 
   beforeEach(() => {
     originalAllowed = process.env.ASEPRITE_ALLOWED_PATHS;
@@ -92,7 +94,8 @@ describe("export_animation", () => {
       activeFrame: 1,
     });
     workflowState = new AnimationWorkflowState(stateTracker);
-    registerFileTools(server, dispatcher, stateTracker, workflowState);
+    approvalState = new ApprovalState();
+    registerFileTools(server, dispatcher, stateTracker, workflowState, approvalState);
     handler = tools.get("export_animation")!;
     spriteSheetHandler = tools.get("export_sprite_sheet")!;
     saveProjectHandler = tools.get("save_project")!;
@@ -184,14 +187,14 @@ describe("export_animation", () => {
     expect(commands.at(-1)?.command).toBe("inspect_animation");
   });
 
-  it("keeps ordinary and non-strict final exports usable without a workflow", async () => {
+  it("keeps ordinary exports usable and blocks final exports lacking human approval", async () => {
     const ordinary = await handler({ format: "png", outputPath: "exports/ordinary.png" });
     expect(ordinary.isError).toBeUndefined();
 
     const final = await handler({ format: "png", outputPath: "exports/final.png", final: true });
-    expect(final.isError).toBeUndefined();
-    expect(parseText(final).completionEvidence).toBeUndefined();
-    expect(commands.filter(({ command }) => command === "inspect_animation")).toHaveLength(2);
+    expect(final.isError).toBe(true);
+    expect(parseText(final).error).toMatch(/humanApprovalId/);
+    expect(commands.filter(({ command }) => command === "inspect_animation")).toHaveLength(1);
   });
 
   it("blocks strict final export without a workflow before any dispatcher command", async () => {

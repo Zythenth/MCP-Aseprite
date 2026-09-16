@@ -75,7 +75,7 @@ describe("analyze_animation_temporal tool layer", () => {
     const dispatcher: any = {
       send: async (command: string, params: any) => {
         commands.push({ command, params });
-        if (command === "inspect_animation") return inspection;
+        if (command === "inspect_animation") return { ...inspection, revision };
         if (command === "render_animation_gif") {
           return {
             success: true,

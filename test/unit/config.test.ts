@@ -19,6 +19,9 @@ import {
   parseBooleanEnv,
   parseToolsets,
   TOOLSETS,
+  isPrivateIpv4,
+  parseBridgeHost,
+  parseRemotePeers,
 } from "../../src/config.js";
 
 describe("Config Constants & Sanitization Tests", () => {
@@ -109,6 +112,29 @@ describe("Config Constants & Sanitization Tests", () => {
       expect(parseToolsets("visual,pixel-art")).toEqual(["core", "visual", "pixel-art"]);
       expect(parseToolsets("visual,visual")).toEqual(["core", "visual"]);
       expect(() => parseToolsets("visual,unknown")).toThrow(/unknown/);
+    });
+  });
+
+  describe("private remote bridge configuration", () => {
+    const token = "a".repeat(32);
+
+    it("allows only explicit private hosts with a strong token", () => {
+      expect(isPrivateIpv4("10.10.0.4")).toBe(true);
+      expect(isPrivateIpv4("172.31.255.254")).toBe(true);
+      expect(isPrivateIpv4("192.168.1.7")).toBe(true);
+      expect(isPrivateIpv4("172.32.0.1")).toBe(false);
+      expect(isPrivateIpv4("0.0.0.0")).toBe(false);
+      expect(isPrivateIpv4("8.8.8.8")).toBe(false);
+      expect(parseBridgeHost("192.168.1.7", true, token)).toBe("192.168.1.7");
+      expect(() => parseBridgeHost("192.168.1.7", false, token)).toThrow(/REMOTE_MODE/);
+      expect(() => parseBridgeHost("8.8.8.8", true, token)).toThrow(/private IPv4/);
+      expect(() => parseBridgeHost("10.0.0.2", true, "a".repeat(31))).toThrow(/32 characters/);
+    });
+
+    it("requires an explicit private allowlist in remote mode", () => {
+      expect(parseRemotePeers("10.0.0.5, 192.168.1.8", true)).toEqual(["10.0.0.5", "192.168.1.8"]);
+      expect(() => parseRemotePeers(undefined, true)).toThrow(/REMOTE_PEERS/);
+      expect(() => parseRemotePeers("8.8.8.8", true)).toThrow(/private IPv4/);
     });
   });
 

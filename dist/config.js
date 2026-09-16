@@ -83,15 +83,42 @@ export function parseCommandTimeout(val, defaultVal = DEFAULT_COMMAND_TIMEOUT_MS
     }
     return parsed;
 }
-function sanitizeHost(val, defaultVal) {
-    if (!val)
-        return defaultVal;
-    const trimmed = val.trim();
-    // Strictly enforce loopback security boundary
-    if (trimmed === "127.0.0.1" || trimmed === "localhost" || trimmed === "::1") {
-        return trimmed;
-    }
-    return defaultVal;
+export function isLoopbackHost(value) {
+    return value === "127.0.0.1" || value === "localhost" || value === "::1";
+}
+export function isPrivateIpv4(value) {
+    const parts = value.split(".");
+    if (parts.length !== 4 || parts.some((part) => !/^(0|[1-9][0-9]{0,2})$/.test(part)))
+        return false;
+    const [a, b, c, d] = parts.map(Number);
+    if ([a, b, c, d].some((part) => part > 255))
+        return false;
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+/** Remote mode deliberately accepts only private LAN/VM IPv4 addresses, never wildcard or public binds. */
+export function parseBridgeHost(value, remoteMode, token) {
+    if (!value || value.trim() === "")
+        return DEFAULT_HOST;
+    const host = value.trim();
+    if (isLoopbackHost(host))
+        return host;
+    if (!remoteMode)
+        throw new Error("Non-loopback ASEPRITE_HOST requires ASEPRITE_REMOTE_MODE=true.");
+    if (!isPrivateIpv4(host))
+        throw new Error("Remote ASEPRITE_HOST must be a private IPv4 address; public, wildcard, and DNS binds are refused.");
+    if (!token || token.length < 32)
+        throw new Error("Remote mode requires an ASEPRITE_BRIDGE_TOKEN of at least 32 characters.");
+    return host;
+}
+export function parseRemotePeers(value, remoteMode) {
+    if (!remoteMode)
+        return [];
+    const peers = (value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+    if (peers.length === 0)
+        throw new Error("Remote mode requires ASEPRITE_REMOTE_PEERS with one or more private client IP addresses.");
+    if (peers.some((peer) => !isPrivateIpv4(peer)))
+        throw new Error("ASEPRITE_REMOTE_PEERS may contain only private IPv4 addresses.");
+    return [...new Set(peers)];
 }
 export const BRIDGE_TOKEN_REGEX = /^[A-Za-z0-9._~-]+$/;
 export const TOOLSETS = [
@@ -143,11 +170,13 @@ export function resolvePortEnv() {
     return port !== undefined ? port : wsPort;
 }
 export const PORT = parsePort(resolvePortEnv(), DEFAULT_PORT);
-export const HOST = sanitizeHost(process.env.ASEPRITE_HOST, DEFAULT_HOST);
+export const BRIDGE_TOKEN = parseBridgeToken(process.env.ASEPRITE_BRIDGE_TOKEN);
+export const REMOTE_MODE = parseBooleanEnv("ASEPRITE_REMOTE_MODE", process.env.ASEPRITE_REMOTE_MODE);
+export const HOST = parseBridgeHost(process.env.ASEPRITE_HOST, REMOTE_MODE, BRIDGE_TOKEN);
+export const REMOTE_PEERS = parseRemotePeers(process.env.ASEPRITE_REMOTE_PEERS, REMOTE_MODE);
 export const COMMAND_TIMEOUT_MS = parseCommandTimeout(process.env.ASEPRITE_COMMAND_TIMEOUT, DEFAULT_COMMAND_TIMEOUT_MS);
 export const ALLOWED_PATHS = getAllowedRoots();
 export const PROJECT_ROOT = resolveProjectRoot(process.env.ASEPRITE_PROJECT_ROOT, ALLOWED_PATHS);
-export const BRIDGE_TOKEN = parseBridgeToken(process.env.ASEPRITE_BRIDGE_TOKEN);
 export const READ_ONLY = parseBooleanEnv("ASEPRITE_READ_ONLY", process.env.ASEPRITE_READ_ONLY);
 export const ENABLED_TOOLSETS = parseToolsets(process.env.ASEPRITE_TOOLSETS);
 export const config = {
@@ -156,6 +185,8 @@ export const config = {
     commandTimeoutMs: COMMAND_TIMEOUT_MS,
     heavyCommandTimeoutMs: HEAVY_COMMAND_TIMEOUT_MS,
     bridgeToken: BRIDGE_TOKEN,
+    remoteMode: REMOTE_MODE,
+    remotePeers: REMOTE_PEERS,
     readOnly: READ_ONLY,
     toolsets: ENABLED_TOOLSETS,
     wsHeartbeatIntervalMs: WS_HEARTBEAT_INTERVAL_MS,

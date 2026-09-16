@@ -353,7 +353,8 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
 
     // 3. A second Aseprite client identifies itself, but must be rejected with
     // code 1008. Shared MCP peers use a different peer_hello handshake.
-    const client2ClosePromise = new Promise<{ code: number; reason: string }>((resolve) => {
+    const client2ClosePromise = new Promise<{ code: number; reason: string; rejection?: unknown }>((resolve) => {
+      let rejection: unknown;
       const ws2 = new WebSocket(`ws://127.0.0.1:${wsServer.getPort()}`);
       clientSockets.push(ws2);
       ws2.on("open", () => {
@@ -369,8 +370,11 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
           },
         }));
       });
+      ws2.on("message", (raw) => {
+        rejection = JSON.parse(raw.toString("utf-8"));
+      });
       ws2.on("close", (code, reason) => {
-        resolve({ code, reason: reason.toString("utf-8") });
+        resolve({ code, reason: reason.toString("utf-8"), rejection });
       });
       ws2.on("error", () => {});
     });
@@ -378,6 +382,10 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
     const closeResult = await client2ClosePromise;
     expect(closeResult.code).toBe(1008);
     expect(closeResult.reason).toContain("Another Aseprite bridge is already connected");
+    expect(closeResult.rejection).toEqual({
+      event: "hello_rejected",
+      data: { code: "BRIDGE_BUSY", retryAfterMs: 1000 },
+    });
 
     // 4. Established Client 1 connection and its in-flight command remain completely usable
     expect(wsServer.isConnected()).toBe(true);

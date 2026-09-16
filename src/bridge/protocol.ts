@@ -98,6 +98,14 @@ export interface BridgeHelloAckMessage {
   };
 }
 
+export interface BridgeHelloRejectedMessage {
+  event: "hello_rejected";
+  data: {
+    code: "BRIDGE_BUSY";
+    retryAfterMs: number;
+  };
+}
+
 export interface BridgePeerHelloMessage {
   event: "peer_hello";
   data: {

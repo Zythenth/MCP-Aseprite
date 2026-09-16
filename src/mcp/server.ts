@@ -21,8 +21,13 @@ import { registerBatchTools } from "./tools/batch.js";
 import { registerWorkflowTools } from "./tools/workflow.js";
 import { registerPixelArtTools } from "./tools/pixelArt.js";
 import { registerReviewTools } from "./tools/review.js";
+import { registerPixelMotionTools } from "./tools/pixelMotion.js";
+import { registerApprovalTools } from "./tools/approval.js";
+import { registerEngineExportTools } from "./tools/engineExport.js";
+import { registerBatchExportTools } from "./tools/batchExport.js";
 import { ReviewState } from "./reviewState.js";
 import { AnimationWorkflowState } from "./animationWorkflowState.js";
+import { ApprovalState } from "./approvalState.js";
 import { createPolicyToolRegistrar } from "./toolPolicy.js";
 import type { Toolset } from "../config.js";
 import { registerMcpResources } from "./resources/index.js";
@@ -39,6 +44,7 @@ export function createMcpServer(
   const activeStateTracker = stateTracker || new BridgeState();
   const reviewState = new ReviewState();
   const workflowState = new AnimationWorkflowState(activeStateTracker);
+  const approvalState = new ApprovalState();
   const readOnly = options.readOnly ?? config.readOnly;
   const enabledToolsets = new Set(options.toolsets ?? [...config.toolsets]);
 
@@ -61,7 +67,9 @@ export function createMcpServer(
   registerStatusTool(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("visual")) registerVisualTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("editing")) registerEditingTools(toolRegistrar, activeDispatcher, activeStateTracker);
-  if (enabledToolsets.has("files")) registerFileTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
+  if (enabledToolsets.has("files")) registerFileTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState, approvalState);
+  if (enabledToolsets.has("files")) registerEngineExportTools(toolRegistrar, activeDispatcher, activeStateTracker);
+  if (enabledToolsets.has("files")) registerBatchExportTools(toolRegistrar, activeDispatcher);
   if (enabledToolsets.has("shapes")) registerShapeTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("layers")) registerLayerTools(toolRegistrar, activeDispatcher, activeStateTracker);
   if (enabledToolsets.has("frames")) registerFrameTools(toolRegistrar, activeDispatcher, activeStateTracker);
@@ -74,6 +82,8 @@ export function createMcpServer(
     registerAnimationInspectionTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
     registerBatchTools(toolRegistrar, activeDispatcher, activeStateTracker);
     registerWorkflowTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
+    registerPixelMotionTools(toolRegistrar, activeDispatcher, activeStateTracker);
+    registerApprovalTools(toolRegistrar, activeDispatcher, activeStateTracker, approvalState);
   }
   if (enabledToolsets.has("pixel-art")) registerPixelArtTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);
   if (enabledToolsets.has("review")) registerReviewTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);

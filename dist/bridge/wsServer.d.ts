@@ -12,10 +12,13 @@ export interface WsServerOptions {
     maxPayload?: number;
     token?: string;
     handshakeTimeoutMs?: number;
+    allowRemote?: boolean;
+    allowedRemoteIps?: string[];
 }
 export declare class BridgeWebSocketServer {
     private static readonly MAX_PENDING_HANDSHAKES;
     private static readonly MAX_PEER_CONNECTIONS;
+    private static readonly BUSY_BRIDGE_REJECTION_GRACE_MS;
     private wss;
     private activeSocket;
     private readonly peerSockets;
@@ -27,6 +30,8 @@ export declare class BridgeWebSocketServer {
     private readonly maxPayload;
     private readonly token?;
     private readonly handshakeTimeoutMs;
+    private readonly allowRemote;
+    private readonly allowedRemoteIps;
     private readonly dispatcher;
     private readonly state;
     constructor(dispatcher: CommandDispatcher, state: BridgeState, options?: WsServerOptions);

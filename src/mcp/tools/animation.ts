@@ -249,7 +249,8 @@ export function registerAnimationInspectionTools(
           throw new Error("Animation timing changed while the preview was being rendered; inspect and render again.");
         }
         const frames = await fetchPlaybackFrames(dispatcher, state, playback.frameNumbers);
-        if (typeof inspection.revision === "number" && state.getRevision() !== inspection.revision) {
+        const verification = await fetchAnimationInspection(dispatcher, state);
+        if (typeof inspection.revision === "number" && verification.revision !== inspection.revision) {
           throw new Error("The sprite changed while the preview was being rendered; render again for a coherent review.");
         }
         const filmstrip = composeFilmstrip(frames.map((frame) => scaledImage(frame, filmstripScale)), columns, gap);
@@ -358,8 +359,9 @@ export function registerAnimationInspectionTools(
         assertAnimationPixelBudget(inspection.width, inspection.height, playback.frameNumbers.length, 1);
 
         const frames = await fetchPlaybackFrames(dispatcher, state, playback.frameNumbers);
+        const verification = await fetchAnimationInspection(dispatcher, state);
         const effectiveRevision = inspection.revision ?? state.getRevision();
-        if (typeof inspection.revision === "number" && state.getRevision() !== inspection.revision) {
+        if (typeof inspection.revision === "number" && verification.revision !== inspection.revision) {
           throw new Error("The sprite changed while temporal analysis was being performed; analyze again for coherent results.");
         }
 

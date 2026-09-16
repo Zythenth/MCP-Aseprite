@@ -30,8 +30,17 @@ describe("Lua Bridge JSON Codec Security Validations (Static Analysis)", () => {
       expect(luaContent).not.toMatch(/\brequire\s*\(/);
     });
 
-    it("ensures os.execute and io.popen system execution primitives are strictly absent", () => {
-      expect(luaContent).not.toContain("os.execute");
+    it("permits only the validated packaged-daemon launch and forbids every other system execution primitive", () => {
+      const launches = luaContent.match(/os\.execute/g) ?? [];
+      const bundledLaunch = /local function startBundledDaemon\(\)([\s\S]*?)local launchedBundledDaemon = startBundledDaemon\(\)/.exec(luaContent);
+
+      expect(launches).toHaveLength(1);
+      expect(bundledLaunch).not.toBeNull();
+      expect(bundledLaunch![1]).toContain('io.open(daemonPath, "rb")');
+      expect(bundledLaunch![1]).toContain("isShellSafePath(extensionDirectory)");
+      expect(bundledLaunch![1]).toContain("isShellSafePath(daemonPath)");
+      expect(bundledLaunch![1]).toContain("isShellSafePath(nodeExecutable)");
+      expect(bundledLaunch![1]).toContain("pcall(os.execute, command)");
       expect(luaContent).not.toContain("io.popen");
       expect(luaContent).not.toContain("package.loadlib");
     });
