@@ -7,6 +7,7 @@ export declare const DEFAULT_BRIDGE_PORT = 32123;
 export declare const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 export declare const DEFAULT_COMMAND_TIMEOUT_MS = 8000;
 export declare const BRIDGE_PROTOCOL_VERSION = "1.2.0";
+export declare const SHARED_BRIDGE_PROTOCOL_VERSION = "1.0.0";
 export declare function isBridgeProtocolCompatible(version: unknown): version is string;
 export declare enum BridgeErrorCode {
     NO_ACTIVE_SPRITE = "NO_ACTIVE_SPRITE",
@@ -27,6 +28,7 @@ export interface BridgeRequestMessage {
     id: string;
     command: string;
     params: Record<string, unknown>;
+    timeoutMs?: number;
 }
 export interface BridgeResponseError {
     code: string;
@@ -75,6 +77,29 @@ export interface BridgeHelloAckMessage {
         resyncRequired: boolean;
     };
 }
+export interface BridgePeerHelloMessage {
+    event: "peer_hello";
+    data: {
+        bridgeProtocolVersion: string;
+        sharedBridgeProtocolVersion: string;
+        clientId: string;
+        token?: string;
+    };
+}
+export interface BridgePeerAckMessage {
+    event: "peer_ack";
+    data: {
+        bridgeProtocolVersion: string;
+        sharedBridgeProtocolVersion: string;
+        status: BridgeStatusResult;
+    };
+}
+export interface BridgePeerStateMessage {
+    event: "peer_state";
+    data: {
+        status: BridgeStatusResult;
+    };
+}
 export interface BridgeEventMessage {
     event: BridgeEventType | string;
     data?: BridgeEventData;
@@ -85,6 +110,7 @@ export type BridgeResponse<T = unknown> = BridgeResponseMessage<T>;
 export type BridgeEvent = BridgeEventMessage;
 export type IncomingBridgeMessage = BridgeResponseMessage | BridgeEventMessage;
 export declare function isBridgeResponseMessage(msg: unknown): msg is BridgeResponseMessage;
+export declare function isBridgeRequestMessage(msg: unknown): msg is BridgeRequestMessage;
 export declare function isBridgeEventMessage(msg: unknown): msg is BridgeEventMessage;
 export declare class BridgeError extends Error {
     readonly code: string;

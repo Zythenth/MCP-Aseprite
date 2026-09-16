@@ -38,7 +38,7 @@ export class CommandDispatcher extends EventEmitter {
             throw new BridgeError(`Maximum pending bridge requests reached (${this.maxPendingCommands})`, BridgeErrorCode.INVALID_PARAMS, { pendingCount: this.pending.size, maxPending: this.maxPendingCommands });
         }
         const id = this.generateId();
-        const requestMessage = { id, command, params };
+        const requestMessage = { id, command, params, timeoutMs };
         const serialized = JSON.stringify(requestMessage);
         const payloadBytes = Buffer.byteLength(serialized, "utf-8");
         if (payloadBytes > this.maxPayloadBytes) {

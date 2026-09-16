@@ -44,9 +44,7 @@ export function registerStatusTool(
         logger.debug("[Tool:aseprite_status] Querying status from bridge dispatcher...");
         const result = await dispatcher.send<AsepriteStatusResult>("aseprite_status", {}, 5000);
 
-        if (typeof result.revision === "number") {
-          stateTracker.setRevision(result.revision);
-        }
+        stateTracker.applyStatus(result, stateTracker.getClientAddress() ?? undefined);
 
         return {
           content: [

@@ -15,8 +15,10 @@ export interface WsServerOptions {
 }
 export declare class BridgeWebSocketServer {
     private static readonly MAX_PENDING_HANDSHAKES;
+    private static readonly MAX_PEER_CONNECTIONS;
     private wss;
     private activeSocket;
+    private readonly peerSockets;
     private readonly pendingHandshakes;
     private heartbeatTimer;
     private readonly host;
@@ -31,11 +33,18 @@ export declare class BridgeWebSocketServer {
     start(): Promise<void>;
     private isLoopbackAddress;
     private handleConnection;
+    private parseHandshake;
+    private parsePeerHello;
+    private handlePeerRequest;
+    private sendPeerResponse;
+    private broadcastBridgeEvent;
+    private broadcastPeerStatus;
     private parseHello;
     private tokensMatch;
     private startHeartbeat;
     close(): Promise<void>;
     isConnected(): boolean;
+    getPeerCount(): number;
     getPort(): number;
 }
 export declare function startWsServer(port?: number, host?: string, dispatcher?: CommandDispatcher, state?: BridgeState, optionsOrToken?: string | {

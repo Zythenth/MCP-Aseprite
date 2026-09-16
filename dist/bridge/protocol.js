@@ -7,6 +7,7 @@ export const DEFAULT_BRIDGE_PORT = 32123;
 export const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 export const DEFAULT_COMMAND_TIMEOUT_MS = 8000;
 export const BRIDGE_PROTOCOL_VERSION = "1.2.0";
+export const SHARED_BRIDGE_PROTOCOL_VERSION = "1.0.0";
 export function isBridgeProtocolCompatible(version) {
     if (typeof version !== "string")
         return false;
@@ -37,6 +38,22 @@ export function isBridgeResponseMessage(msg) {
         typeof msg.id === "string" &&
         "success" in msg &&
         typeof msg.success === "boolean");
+}
+export function isBridgeRequestMessage(msg) {
+    if (typeof msg !== "object" || msg === null || Array.isArray(msg))
+        return false;
+    const request = msg;
+    return (typeof request.id === "string" &&
+        request.id.length >= 1 &&
+        request.id.length <= 160 &&
+        typeof request.command === "string" &&
+        request.command.length >= 1 &&
+        request.command.length <= 128 &&
+        typeof request.params === "object" &&
+        request.params !== null &&
+        !Array.isArray(request.params) &&
+        (request.timeoutMs === undefined ||
+            (Number.isSafeInteger(request.timeoutMs) && request.timeoutMs > 0)));
 }
 export function isBridgeEventMessage(msg) {
     return (typeof msg === "object" &&

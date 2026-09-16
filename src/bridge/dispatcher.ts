@@ -82,7 +82,7 @@ export class CommandDispatcher extends EventEmitter {
     }
 
     const id = this.generateId();
-    const requestMessage: BridgeRequestMessage = { id, command, params };
+    const requestMessage: BridgeRequestMessage = { id, command, params, timeoutMs };
     const serialized = JSON.stringify(requestMessage);
     const payloadBytes = Buffer.byteLength(serialized, "utf-8");
 

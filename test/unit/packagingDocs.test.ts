@@ -21,6 +21,11 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     expect(pkg.files).toContain("examples");
   });
 
+  it("ships the persistent bridge daemon entrypoint in source and compiled output", () => {
+    expect(fs.existsSync(path.resolve(rootDir, "src/bridge/daemon.ts"))).toBe(true);
+    expect(fs.existsSync(path.resolve(rootDir, "dist/bridge/daemon.js"))).toBe(true);
+  });
+
   it("LICENSE contains standard MIT license text, Permission clause, and copyright 2026 Zythenth", () => {
     const licensePath = path.resolve(rootDir, "LICENSE");
     expect(fs.existsSync(licensePath)).toBe(true);
@@ -108,7 +113,7 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     expect(startContent).toContain("[switch]$ReadOnly");
     expect(startContent).toContain("[string[]]$Toolsets");
     expect(startContent).toContain("[switch]$ManualBridgeServer");
-    expect(startContent).toContain("standalone bridge server");
+    expect(startContent).toContain("persistent bridge daemon");
     expect(startContent).toContain("ASEPRITE_READ_ONLY");
     expect(startContent).toContain("ASEPRITE_TOOLSETS");
   });
@@ -184,7 +189,7 @@ describe("Packaging, Documentation & Script Alignment Static Contract", () => {
     const luaContent = fs.readFileSync(luaPath, "utf-8");
 
     expect(luaContent).not.toMatch(/WebSocketMessageType\.ERROR[\s\S]*?tostring\s*\(\s*err\s*\)/);
-    expect(luaContent).toContain('Connection error (check server logs)');
+    expect(luaContent).toContain('MCP server unavailable on 127.0.0.1:');
     expect(luaContent).not.toMatch(/dlg:modify\{[^}]*BRIDGE_TOKEN/);
   });
 

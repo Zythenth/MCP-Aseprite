@@ -29,6 +29,7 @@ Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 - **Superfície configurável**: modo somente leitura e seleção de toolsets para reduzir risco e custo de descoberta.
 - **Mock Bridge em memória**: possibilita testes de integração rápidos e headless sem necessidade de abrir a interface do Aseprite.
 - **Transporte padrão stdio**: mensagens de protocolo MCP isoladas em `stdout` e registros de diagnóstico em `stderr`.
+- **Conexão persistente compartilhada**: um daemon local invisível mantém o único socket do Aseprite, enquanto todas as instâncias stdio entram como pares autenticados e podem abrir ou encerrar sem derrubar a conexão do editor.
 
 ---
 
@@ -243,7 +244,7 @@ Crie uma animação no Aseprite usando exclusivamente as ferramentas aseprite/.
 A skill proíbe o uso de Python, terminal e scripts auxiliares para gerar pixels, exige edição por coordenadas explícitas, preview, análise temporal, revisão e verificação dos arquivos finais. Ela complementa as instruções enviadas automaticamente pelo próprio servidor MCP.
 
 > [!IMPORTANT]
-> **Use somente uma instância do servidor por bridge.** Quando o cliente MCP inicia `dist/index.js` a partir da configuração acima, ele já é o servidor que deve receber a conexão do Aseprite. Não execute `npm start` ou `start.ps1` em paralelo: isso ocupa a porta do bridge e impede a segunda instância de controlar o Aseprite. Se houver uma instância manual antiga, o cliente MCP manterá `aseprite_status` disponível, exibirá o conflito e tentará retomar a porta automaticamente a cada dois segundos depois que a instância antiga for encerrada.
+> **Várias conversas compartilham o mesmo bridge persistente.** Cada cliente stdio mantém sua própria sessão MCP e se conecta a um daemon local iniciado automaticamente pela primeira conversa. O daemon permanece ativo depois que as conversas terminam, portanto o socket do Aseprite não é derrubado quando uma tarefa fecha. Novas conversas apenas entram como pares e reutilizam a conexão existente. Uma porta ocupada por outro programa ou um token divergente continua sendo rejeitada e reavaliada automaticamente.
 
 ---
 

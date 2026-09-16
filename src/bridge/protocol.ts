@@ -8,6 +8,7 @@ export const DEFAULT_BRIDGE_PORT = 32123;
 export const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 export const DEFAULT_COMMAND_TIMEOUT_MS = 8000;
 export const BRIDGE_PROTOCOL_VERSION = "1.2.0";
+export const SHARED_BRIDGE_PROTOCOL_VERSION = "1.0.0";
 
 export function isBridgeProtocolCompatible(version: unknown): version is string {
   if (typeof version !== "string") return false;
@@ -36,6 +37,7 @@ export interface BridgeRequestMessage {
   id: string; // e.g. "req_1694432000000_1_a1b2c"
   command: string; // e.g. "aseprite_status", "set_pixels", "get_canvas"
   params: Record<string, unknown>;
+  timeoutMs?: number;
 }
 
 export interface BridgeResponseError {
@@ -96,6 +98,32 @@ export interface BridgeHelloAckMessage {
   };
 }
 
+export interface BridgePeerHelloMessage {
+  event: "peer_hello";
+  data: {
+    bridgeProtocolVersion: string;
+    sharedBridgeProtocolVersion: string;
+    clientId: string;
+    token?: string;
+  };
+}
+
+export interface BridgePeerAckMessage {
+  event: "peer_ack";
+  data: {
+    bridgeProtocolVersion: string;
+    sharedBridgeProtocolVersion: string;
+    status: BridgeStatusResult;
+  };
+}
+
+export interface BridgePeerStateMessage {
+  event: "peer_state";
+  data: {
+    status: BridgeStatusResult;
+  };
+}
+
 export interface BridgeEventMessage {
   event: BridgeEventType | string;
   data?: BridgeEventData;
@@ -116,6 +144,24 @@ export function isBridgeResponseMessage(msg: unknown): msg is BridgeResponseMess
     typeof (msg as any).id === "string" &&
     "success" in msg &&
     typeof (msg as any).success === "boolean"
+  );
+}
+
+export function isBridgeRequestMessage(msg: unknown): msg is BridgeRequestMessage {
+  if (typeof msg !== "object" || msg === null || Array.isArray(msg)) return false;
+  const request = msg as Record<string, unknown>;
+  return (
+    typeof request.id === "string" &&
+    request.id.length >= 1 &&
+    request.id.length <= 160 &&
+    typeof request.command === "string" &&
+    request.command.length >= 1 &&
+    request.command.length <= 128 &&
+    typeof request.params === "object" &&
+    request.params !== null &&
+    !Array.isArray(request.params) &&
+    (request.timeoutMs === undefined ||
+      (Number.isSafeInteger(request.timeoutMs) && (request.timeoutMs as number) > 0))
   );
 }
 

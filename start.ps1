@@ -17,7 +17,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptDir
 
 if (-not $ManualBridgeServer) {
-    Write-Error "start.ps1 launches a standalone bridge server. When Gemini, Antigravity, Claude Desktop, or another stdio MCP client starts dist/index.js from its MCP configuration, do not run this script in parallel. Re-run with -ManualBridgeServer only for standalone diagnostics."
+    Write-Error "MCP clients automatically start and share the persistent bridge daemon. Re-run with -ManualBridgeServer only to keep a standalone stdio diagnostics process open."
     exit 1
 }
 

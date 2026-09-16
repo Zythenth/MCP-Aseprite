@@ -10,13 +10,27 @@ import { timingSafeEqual } from "node:crypto";
 import { logger } from "../logger.js";
 import {
   BRIDGE_PROTOCOL_VERSION,
+  SHARED_BRIDGE_PROTOCOL_VERSION,
   DEFAULT_BRIDGE_HOST,
   DEFAULT_BRIDGE_PORT,
   isBridgeProtocolCompatible,
+  isBridgeEventMessage,
+  isBridgeRequestMessage,
+  BridgeError,
+  BridgeErrorCode,
   type BridgeHelloAckMessage,
   type BridgeHelloData,
+  type BridgePeerAckMessage,
+  type BridgePeerHelloMessage,
+  type BridgePeerStateMessage,
+  type BridgeResponseMessage,
 } from "./protocol.js";
-import { MAX_BRIDGE_PAYLOAD_BYTES } from "../config.js";
+import {
+  MAX_BRIDGE_PAYLOAD_BYTES,
+  MAX_COMMAND_TIMEOUT_MS,
+  MAX_PENDING_COMMANDS,
+  MIN_COMMAND_TIMEOUT_MS,
+} from "../config.js";
 import type { CommandDispatcher } from "./dispatcher.js";
 import type { BridgeState } from "./state.js";
 
@@ -34,10 +48,12 @@ interface AliveWebSocket extends WebSocket {
 }
 
 export class BridgeWebSocketServer {
-  private static readonly MAX_PENDING_HANDSHAKES = 8;
+  private static readonly MAX_PENDING_HANDSHAKES = MAX_PENDING_COMMANDS;
+  private static readonly MAX_PEER_CONNECTIONS = MAX_PENDING_COMMANDS;
 
   private wss: WebSocketServer | null = null;
   private activeSocket: AliveWebSocket | null = null;
+  private readonly peerSockets = new Set<AliveWebSocket>();
   private readonly pendingHandshakes = new Set<AliveWebSocket>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private readonly host: string;
@@ -63,6 +79,7 @@ export class BridgeWebSocketServer {
   public async start(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
+        let started = false;
         this.wss = new WebSocketServer({
           host: this.host,
           port: this.port,
@@ -70,6 +87,7 @@ export class BridgeWebSocketServer {
         });
 
         this.wss.on("listening", () => {
+          started = true;
           const addr = this.wss?.address();
           const actualPort = typeof addr === "object" && addr !== null ? addr.port : this.port;
           logger.info(`Bridge WebSocket server listening strictly on ${this.host}:${actualPort}`);
@@ -85,7 +103,10 @@ export class BridgeWebSocketServer {
           if (err.code === "EADDRINUSE") {
             logger.error(`Port ${this.port} is already in use. Ensure no other instance is running.`);
           }
-          reject(err);
+          if (!started) {
+            this.wss = null;
+            reject(err);
+          }
         });
 
         this.wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
@@ -117,18 +138,6 @@ export class BridgeWebSocketServer {
       return;
     }
 
-    // First-client pinning:
-    // while an active socket is OPEN or CONNECTING, reject/close the newcomer with policy code 1008
-    // without clearing the dispatcher, state, or in-flight requests for the established client.
-    if (
-      this.activeSocket &&
-      (this.activeSocket.readyState === WebSocket.OPEN || this.activeSocket.readyState === WebSocket.CONNECTING)
-    ) {
-      logger.warn(`Rejected incoming bridge connection from ${remoteIp}: active client already established`);
-      socket.close(1008, "Another client is already connected");
-      return;
-    }
-
     if (this.pendingHandshakes.size >= BridgeWebSocketServer.MAX_PENDING_HANDSHAKES) {
       logger.warn(`Rejected bridge connection from ${remoteIp}: too many pending handshakes`);
       socket.close(1013, "Too many pending bridge handshakes");
@@ -139,6 +148,7 @@ export class BridgeWebSocketServer {
     socket.isAlive = true;
     this.pendingHandshakes.add(socket);
     let promoted = false;
+    let role: "candidate" | "bridge" | "peer" = "candidate";
     let cleanedUp = false;
 
     const cleanupCandidate = () => {
@@ -174,21 +184,49 @@ export class BridgeWebSocketServer {
       const raw = data.toString("utf-8");
 
       if (!promoted) {
-        const hello = this.parseHello(raw);
-        if (!hello.ok) {
-          rejectCandidate(hello.code, hello.reason);
+        const handshake = this.parseHandshake(raw);
+        if (!handshake.ok) {
+          rejectCandidate(handshake.code, handshake.reason);
           return;
         }
 
-        if (this.activeSocket && this.activeSocket.readyState === WebSocket.OPEN) {
-          rejectCandidate(1008, "Another client is already connected");
+        if (handshake.kind === "peer") {
+          if (this.peerSockets.size >= BridgeWebSocketServer.MAX_PEER_CONNECTIONS) {
+            rejectCandidate(1013, "Too many shared MCP bridge peers");
+            return;
+          }
+
+          cleanupCandidate();
+          promoted = true;
+          role = "peer";
+          this.peerSockets.add(socket);
+          const acknowledgement: BridgePeerAckMessage = {
+            event: "peer_ack",
+            data: {
+              bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
+              sharedBridgeProtocolVersion: SHARED_BRIDGE_PROTOCOL_VERSION,
+              status: this.state.getStatus(),
+            },
+          };
+          socket.send(JSON.stringify(acknowledgement));
+          logger.info(`Shared MCP bridge peer connected from ${remoteIp} (${handshake.data.clientId})`);
+          return;
+        }
+
+        if (
+          this.activeSocket &&
+          (this.activeSocket.readyState === WebSocket.OPEN ||
+            this.activeSocket.readyState === WebSocket.CONNECTING)
+        ) {
+          rejectCandidate(1008, "Another Aseprite bridge is already connected");
           return;
         }
 
         cleanupCandidate();
         promoted = true;
+        role = "bridge";
         this.activeSocket = socket;
-        const sync = this.state.handleHello(hello.data);
+        const sync = this.state.handleHello(handshake.data);
         this.state.setConnected(true, remoteIp);
         this.dispatcher.setActiveSocket(socket);
 
@@ -196,40 +234,199 @@ export class BridgeWebSocketServer {
           event: "hello_ack",
           data: {
             bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
-            sessionId: hello.data.sessionId,
+            sessionId: handshake.data.sessionId,
             resyncRequired: sync.resyncRequired,
           },
         };
         socket.send(JSON.stringify(acknowledgement));
         logger.info(
-          `Bridge client authenticated from ${remoteIp} (Aseprite ${hello.data.asepriteVersion}, session ${hello.data.sessionId})`
+          `Bridge client authenticated from ${remoteIp} (Aseprite ${handshake.data.asepriteVersion}, session ${handshake.data.sessionId})`
         );
+        this.broadcastPeerStatus();
+        return;
+      }
+
+      if (role === "peer") {
+        this.handlePeerRequest(socket, raw);
         return;
       }
 
       this.dispatcher.handleIncomingMessage(raw);
+      this.broadcastBridgeEvent(raw);
     });
 
     socket.on("close", (code: number, reason: Buffer) => {
       cleanupCandidate();
       const reasonStr = reason ? reason.toString("utf-8") : "";
       logger.info(`Bridge connection closed (code: ${code}, reason: '${reasonStr || "normal"}')`);
-      if (this.activeSocket === socket) {
+      if (role === "peer") {
+        this.peerSockets.delete(socket);
+      } else if (this.activeSocket === socket) {
         this.activeSocket = null;
         this.state.setConnected(false);
         this.dispatcher.clearActiveSocket("Bridge socket closed");
+        this.broadcastPeerStatus();
       }
     });
 
     socket.on("error", (err: Error) => {
       cleanupCandidate();
       logger.error(`Bridge socket error: ${err.message}`);
-      if (this.activeSocket === socket) {
+      if (role === "peer") {
+        this.peerSockets.delete(socket);
+      } else if (this.activeSocket === socket) {
         this.activeSocket = null;
         this.state.setConnected(false);
         this.dispatcher.clearActiveSocket(`Bridge socket error: ${err.message}`);
+        this.broadcastPeerStatus();
       }
     });
+  }
+
+  private parseHandshake(
+    raw: string
+  ):
+    | { ok: true; kind: "bridge"; data: BridgeHelloData }
+    | { ok: true; kind: "peer"; data: BridgePeerHelloMessage["data"] }
+    | { ok: false; code: number; reason: string } {
+    let message: unknown;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return { ok: false, code: 1002, reason: "First message must be valid JSON" };
+    }
+
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      !Array.isArray(message) &&
+      (message as { event?: unknown }).event === "peer_hello"
+    ) {
+      return this.parsePeerHello(message);
+    }
+
+    const bridgeHello = this.parseHello(raw);
+    return bridgeHello.ok
+      ? { ok: true, kind: "bridge", data: bridgeHello.data }
+      : bridgeHello;
+  }
+
+  private parsePeerHello(
+    message: object
+  ):
+    | { ok: true; kind: "peer"; data: BridgePeerHelloMessage["data"] }
+    | { ok: false; code: number; reason: string } {
+    const envelope = message as { data?: unknown };
+    if (!envelope.data || typeof envelope.data !== "object" || Array.isArray(envelope.data)) {
+      return { ok: false, code: 1002, reason: "Invalid shared bridge hello" };
+    }
+
+    const data = envelope.data as Record<string, unknown>;
+    if (!isBridgeProtocolCompatible(data.bridgeProtocolVersion)) {
+      return { ok: false, code: 1002, reason: "Incompatible shared bridge protocol" };
+    }
+    if (data.sharedBridgeProtocolVersion !== SHARED_BRIDGE_PROTOCOL_VERSION) {
+      return { ok: false, code: 1002, reason: "Incompatible shared bridge relay protocol" };
+    }
+    if (typeof data.clientId !== "string" || data.clientId.length < 8 || data.clientId.length > 160) {
+      return { ok: false, code: 1002, reason: "Invalid shared bridge client identifier" };
+    }
+    if (this.token && !this.tokensMatch(this.token, data.token)) {
+      return { ok: false, code: 1008, reason: "Invalid bridge authentication" };
+    }
+
+    return {
+      ok: true,
+      kind: "peer",
+      data: {
+        bridgeProtocolVersion: data.bridgeProtocolVersion,
+        sharedBridgeProtocolVersion: data.sharedBridgeProtocolVersion,
+        clientId: data.clientId,
+        token: typeof data.token === "string" ? data.token : undefined,
+      },
+    };
+  }
+
+  private handlePeerRequest(socket: AliveWebSocket, raw: string): void {
+    let message: unknown;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      socket.close(1002, "Shared bridge request must be valid JSON");
+      return;
+    }
+
+    if (!isBridgeRequestMessage(message)) {
+      socket.close(1002, "Invalid shared bridge request");
+      return;
+    }
+
+    const request = message;
+    if (
+      request.timeoutMs !== undefined &&
+      (request.timeoutMs < MIN_COMMAND_TIMEOUT_MS || request.timeoutMs > MAX_COMMAND_TIMEOUT_MS)
+    ) {
+      this.sendPeerResponse(socket, {
+        id: request.id,
+        success: false,
+        error: {
+          code: BridgeErrorCode.INVALID_PARAMS,
+          message: `Invalid command timeout: expected ${MIN_COMMAND_TIMEOUT_MS}..${MAX_COMMAND_TIMEOUT_MS} ms`,
+        },
+      });
+      return;
+    }
+
+    void this.dispatcher
+      .send(request.command, request.params, request.timeoutMs)
+      .then((result) => {
+        this.sendPeerResponse(socket, { id: request.id, success: true, result });
+      })
+      .catch((error: unknown) => {
+        const bridgeError =
+          error instanceof BridgeError
+            ? error
+            : new BridgeError(
+                error instanceof Error ? error.message : "Shared bridge command failed"
+              );
+        this.sendPeerResponse(socket, {
+          id: request.id,
+          success: false,
+          error: {
+            code: bridgeError.code,
+            message: bridgeError.message,
+            details: bridgeError.details,
+          },
+        });
+      });
+  }
+
+  private sendPeerResponse(socket: AliveWebSocket, response: BridgeResponseMessage): void {
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(response));
+  }
+
+  private broadcastBridgeEvent(raw: string): void {
+    let message: unknown;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!isBridgeEventMessage(message)) return;
+    for (const peer of this.peerSockets) {
+      if (peer.readyState === WebSocket.OPEN) peer.send(raw);
+    }
+  }
+
+  private broadcastPeerStatus(): void {
+    const message: BridgePeerStateMessage = {
+      event: "peer_state",
+      data: { status: this.state.getStatus() },
+    };
+    const serialized = JSON.stringify(message);
+    for (const peer of this.peerSockets) {
+      if (peer.readyState === WebSocket.OPEN) peer.send(serialized);
+    }
   }
 
   private parseHello(
@@ -311,19 +508,29 @@ export class BridgeWebSocketServer {
   private startHeartbeat(): void {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = setInterval(() => {
-      if (!this.activeSocket) return;
-
-      if (this.activeSocket.isAlive === false) {
-        logger.warn("Bridge client heartbeat failed (no pong response); terminating socket");
-        this.activeSocket.terminate();
-        this.activeSocket = null;
-        this.state.setConnected(false);
-        this.dispatcher.clearActiveSocket("Heartbeat timeout");
-        return;
+      if (this.activeSocket) {
+        if (this.activeSocket.isAlive === false) {
+          logger.warn("Bridge client heartbeat failed (no pong response); terminating socket");
+          this.activeSocket.terminate();
+          this.activeSocket = null;
+          this.state.setConnected(false);
+          this.dispatcher.clearActiveSocket("Heartbeat timeout");
+          this.broadcastPeerStatus();
+        } else {
+          this.activeSocket.isAlive = false;
+          this.activeSocket.ping();
+        }
       }
 
-      this.activeSocket.isAlive = false;
-      this.activeSocket.ping();
+      for (const peer of this.peerSockets) {
+        if (peer.isAlive === false) {
+          peer.terminate();
+          this.peerSockets.delete(peer);
+        } else {
+          peer.isAlive = false;
+          peer.ping();
+        }
+      }
     }, this.pingIntervalMs);
   }
 
@@ -340,6 +547,8 @@ export class BridgeWebSocketServer {
 
     for (const socket of this.pendingHandshakes) socket.terminate();
     this.pendingHandshakes.clear();
+    for (const socket of this.peerSockets) socket.terminate();
+    this.peerSockets.clear();
 
     this.state.setConnected(false);
     this.dispatcher.clearActiveSocket("Server stopping");
@@ -357,6 +566,10 @@ export class BridgeWebSocketServer {
 
   public isConnected(): boolean {
     return this.activeSocket !== null && this.activeSocket.readyState === WebSocket.OPEN;
+  }
+
+  public getPeerCount(): number {
+    return this.peerSockets.size;
   }
 
   public getPort(): number {

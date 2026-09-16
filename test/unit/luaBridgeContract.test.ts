@@ -627,7 +627,7 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       const wsErrorMatch = /WebSocketMessageType\.ERROR\s+then([\s\S]*?)(?:elseif|end)/.exec(luaContent);
       expect(wsErrorMatch).not.toBeNull();
       const wsErrorBody = wsErrorMatch![1];
-      expect(wsErrorBody).toContain('dlg:modify{ id = "status_lbl", text = "Connection error (check server logs)" }');
+      expect(wsErrorBody).toContain('dlg:modify{ id = "status_lbl", text = "MCP server unavailable on 127.0.0.1:" .. PORT .. " (retrying...)" }');
       expect(wsErrorBody).not.toContain("tostring(err)");
       expect(wsErrorBody).not.toMatch(/\.\.\s*err\b/);
 

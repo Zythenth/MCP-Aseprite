@@ -4332,7 +4332,7 @@ initWebSocket = function(dlg)
       elseif msgType == WebSocketMessageType.ERROR then
         state.wsOpen = false
         state.authenticated = false
-        dlg:modify{ id = "status_lbl", text = "Connection error (check server logs)" }
+        dlg:modify{ id = "status_lbl", text = "MCP server unavailable on 127.0.0.1:" .. PORT .. " (retrying...)" }
         scheduleReconnectFallback(dlg, generation)
 
       elseif msgType == WebSocketMessageType.TEXT then

@@ -120,6 +120,68 @@ export class BridgeState extends EventEmitter {
         this._activeSprite = metadata;
         this.emit("sprite_change", this._activeSprite);
     }
+    applyStatus(status, clientAddress) {
+        const wasConnected = this._connected;
+        const previousSprite = this._activeSprite;
+        const previousRevision = this._revision;
+        const previousSessionId = this._sessionId;
+        const sessionChanged = status.sessionId !== null &&
+            status.sessionId !== undefined &&
+            status.sessionId !== previousSessionId;
+        this._connected = status.connected;
+        this._clientAddress = status.connected ? clientAddress || this._clientAddress : null;
+        this._connectedAt = status.connected ? this._connectedAt || new Date() : null;
+        this._revision = sessionChanged ? status.revision : Math.max(this._revision, status.revision);
+        this._bridgeProtocolVersion = status.bridgeProtocolVersion ?? null;
+        this._asepriteVersion = status.asepriteVersion ?? null;
+        this._apiVersion = status.apiVersion ?? null;
+        this._sessionId = status.sessionId ?? null;
+        this._previousSessionId = status.previousSessionId ?? (sessionChanged ? previousSessionId : this._previousSessionId);
+        this._capabilities = { ...(status.capabilities ?? {}) };
+        this._resyncRequired = status.sync?.resyncRequired ?? !status.connected;
+        this._gap = status.sync?.gap ?? !status.connected;
+        this._activeSprite = status.hasActiveSprite
+            ? {
+                filename: status.filename,
+                width: status.width,
+                height: status.height,
+                colorMode: status.colorMode,
+                layersCount: status.layersCount,
+                framesCount: status.framesCount,
+                activeLayer: status.activeLayer,
+                activeFrame: status.activeFrame,
+            }
+            : null;
+        if (status.connected)
+            this.setConnectionIssue(null);
+        if (wasConnected !== status.connected) {
+            this.emit("connection_change", {
+                connected: status.connected,
+                clientAddress: this._clientAddress,
+            });
+        }
+        if (sessionChanged && this._sessionId) {
+            this.emit("hello", {
+                bridgeProtocolVersion: this._bridgeProtocolVersion,
+                asepriteVersion: this._asepriteVersion,
+                apiVersion: this._apiVersion,
+                sessionId: this._sessionId,
+                revision: this._revision,
+                capabilities: { ...this._capabilities },
+                previousSessionId: this._previousSessionId,
+                resyncRequired: this._resyncRequired,
+                gap: this._gap,
+            });
+        }
+        if (previousSprite?.filename !== this._activeSprite?.filename ||
+            previousSprite?.width !== this._activeSprite?.width ||
+            previousSprite?.height !== this._activeSprite?.height) {
+            this.emit("sprite_change", this._activeSprite);
+        }
+        if (previousRevision !== this._revision) {
+            this.emit("revision_change", { revision: this._revision });
+        }
+    }
     handleBridgeEvent(eventName, data) {
         if (eventName === "revision_changed") {
             const incomingRev = typeof data?.revision === "number" ? data.revision : this._revision + 1;

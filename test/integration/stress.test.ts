@@ -351,10 +351,24 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
     const p1 = dispatcher.send("slow_cmd_on_ws1", {}, 5000);
     expect(dispatcher.getPendingCount()).toBe(1);
 
-    // 3. Client 2 attempts to connect, but must be rejected with code 1008 policy violation
+    // 3. A second Aseprite client identifies itself, but must be rejected with
+    // code 1008. Shared MCP peers use a different peer_hello handshake.
     const client2ClosePromise = new Promise<{ code: number; reason: string }>((resolve) => {
       const ws2 = new WebSocket(`ws://127.0.0.1:${wsServer.getPort()}`);
       clientSockets.push(ws2);
+      ws2.on("open", () => {
+        ws2.send(JSON.stringify({
+          event: "hello",
+          data: {
+            bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
+            asepriteVersion: "stress-test-duplicate",
+            apiVersion: 0,
+            sessionId: randomUUID(),
+            revision: 1,
+            capabilities: { stressTest: true },
+          },
+        }));
+      });
       ws2.on("close", (code, reason) => {
         resolve({ code, reason: reason.toString("utf-8") });
       });
@@ -363,7 +377,7 @@ describe("Milestone 1 Empirical Stress & Adversarial Test Suite", () => {
 
     const closeResult = await client2ClosePromise;
     expect(closeResult.code).toBe(1008);
-    expect(closeResult.reason).toContain("Another client is already connected");
+    expect(closeResult.reason).toContain("Another Aseprite bridge is already connected");
 
     // 4. Established Client 1 connection and its in-flight command remain completely usable
     expect(wsServer.isConnected()).toBe(true);

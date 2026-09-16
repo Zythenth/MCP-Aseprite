@@ -47,6 +47,7 @@ export declare class BridgeState extends EventEmitter {
     markSynchronized(sessionId: string, revision: number): boolean;
     incrementRevision(): number;
     updateActiveSprite(metadata: ActiveSpriteMetadata | null): void;
+    applyStatus(status: BridgeStatusResult, clientAddress?: string): void;
     handleBridgeEvent(eventName: string, data: any): void;
     getStatus(): BridgeStatusResult;
 }

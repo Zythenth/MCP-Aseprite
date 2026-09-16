@@ -5,7 +5,10 @@ import { randomUUID } from "node:crypto";
 import { BridgeWebSocketServer } from "../../src/bridge/wsServer.js";
 import { CommandDispatcher } from "../../src/bridge/dispatcher.js";
 import { BridgeState } from "../../src/bridge/state.js";
-import { BRIDGE_PROTOCOL_VERSION } from "../../src/bridge/protocol.js";
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  SHARED_BRIDGE_PROTOCOL_VERSION,
+} from "../../src/bridge/protocol.js";
 import { MockAsepriteEngine } from "../../src/mock/mockEngine.js";
 import { MockClient } from "../../src/mock/mockClient.js";
 import { startMockBridge, stopMockBridge } from "../../src/mock/index.js";
@@ -136,6 +139,29 @@ describe("WebSocket Bridge hello and token authentication", () => {
     expect(state.isConnected()).toBe(true);
   });
 
+  it("rejects a second Aseprite bridge without replacing the active bridge", async () => {
+    const port = wsServer.getPort();
+    const activeWs = await connectAndHandshake(`ws://127.0.0.1:${port}`, VALID_TOKEN);
+    clientSockets.push(activeWs);
+
+    const duplicateWs = new WebSocket(`ws://127.0.0.1:${port}`);
+    clientSockets.push(duplicateWs);
+    const closeEvent = await new Promise<{ code: number; reason: string }>((resolve) => {
+      duplicateWs.on("open", () => duplicateWs.send(JSON.stringify(hello(VALID_TOKEN))));
+      duplicateWs.on("close", (code, reason) => {
+        resolve({ code, reason: reason.toString("utf-8") });
+      });
+    });
+
+    expect(closeEvent).toEqual({
+      code: 1008,
+      reason: "Another Aseprite bridge is already connected",
+    });
+    expect(wsServer.isConnected()).toBe(true);
+    expect(dispatcher.isConnected()).toBe(true);
+    expect(state.isConnected()).toBe(true);
+  });
+
   it("invalid authentication attempt during active client does not interrupt established client or inflight commands", async () => {
     const port = wsServer.getPort();
 
@@ -169,12 +195,25 @@ describe("WebSocket Bridge hello and token authentication", () => {
     const intruderWs = new WebSocket(`ws://127.0.0.1:${port}`);
     clientSockets.push(intruderWs);
     const closeIntruder = await new Promise<{ code: number; reason: string }>((resolve) => {
+      intruderWs.on("open", () => {
+        intruderWs.send(
+          JSON.stringify({
+            event: "peer_hello",
+            data: {
+              bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
+              sharedBridgeProtocolVersion: SHARED_BRIDGE_PROTOCOL_VERSION,
+              clientId: "unauthorized-peer",
+              token: "WrongToken_123456789.invalid",
+            },
+          })
+        );
+      });
       intruderWs.on("close", (code, reason) => {
         resolve({ code, reason: reason.toString("utf-8") });
       });
     });
     expect(closeIntruder.code).toBe(1008);
-    expect(closeIntruder.reason).toBe("Another client is already connected");
+    expect(closeIntruder.reason).toBe("Invalid bridge authentication");
 
     // 5. Confirm pending is STILL 1 and established connection remains fully active
     expect(dispatcher.getPendingCount()).toBe(1);
