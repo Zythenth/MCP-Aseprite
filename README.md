@@ -74,6 +74,8 @@ No Aseprite, abra **Edit > Preferences > Extensions > Add Extension** e selecion
 
 Isso elimina copiar o Lua e abrir um terminal para iniciar o bridge. O Node.js continua necessário como runtime local, e o cliente de IA ainda precisa apontar para `dist/index.js` uma vez, conforme a seção de configuração do cliente MCP.
 
+> Antes de editar, execute `aseprite_status` e confirme `connected: true`.
+
 ### Desenvolver ou empacotar a extensão
 
 Clone o repositório e navegue até a pasta:
@@ -380,6 +382,8 @@ O conjunto completo contém **138 ferramentas únicas**. Para reduzir o contexto
 - `assess_directional_mirroring` exige uma decisão explícita para espada em uma mão, texto, cicatrizes, iluminação ou equipamento assimétrico. `mirror_directional_animation` só espelha depois dessa aprovação e cria um novo tag sem sobrescrever o original.
 - Os eventos retornados pelo plano (`impact`/`shot`, `final_pose`, `dash_*`, `cast_*` e `interaction_contact`) incluem os frames por direção e podem ser encaminhados diretamente ao parâmetro `events` de `export_engine_assets`.
 - Interações exigem `targetHeightPx`, `targetOffsetX` e `targetOffsetY`, evitando templates cegos para objetos em alturas ou posições diferentes.
+
+> Fluxo curto: `plan_directional_animation` → key poses/timeline → preview + análise → decisão explícita antes do espelhamento.
 
 ### Modo pintura ao vivo
 
