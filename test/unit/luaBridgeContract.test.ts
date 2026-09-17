@@ -132,7 +132,7 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
     });
 
     it("accepts the Windows CRLF checkout form for reconnect helper contracts", () => {
-      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8").replace(/\n/g, "\r\n");
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8").replace(/\r?\n/g, "\r\n");
 
       expect(/local function scheduleReconnectFallback\(dlg, generation\)([\s\S]*?)end\r?\n\r?\ninitWebSocket/.exec(luaContent)).not.toBeNull();
       expect(/local function startBridgeHealthCheck\(dlg\)([\s\S]*?)end\r?\n\r?\ninitWebSocket/.exec(luaContent)).not.toBeNull();
