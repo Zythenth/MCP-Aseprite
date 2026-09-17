@@ -20,7 +20,7 @@ Observar -> analisar -> editar -> inspecionar novamente -> corrigir
 - **Inspeção visual rica**: previews em PNG com escala nearest-neighbor, réguas de coordenadas e grades customizáveis.
 - **Leitura precisa de pixels**: formatos hexadecimal (`#RRGGBBAA`), RGBA, indexado e compacto otimizado para economia de tokens.
 - **Edição em lote e Undo atômico**: operações em lote agrupadas em uma única entrada de histórico de Undo.
-- **132 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, preview animado, revisão visual, análise de pixel art, tween, smear, aprovação humana, pintura ao vivo e exportação para engines.
+- **138 ferramentas MCP tipadas**: pixels, formas, referências locais, arquivos, camadas/grupos, frames/tags, cels, slices, seleções, tilesets/tilemaps, preview animado, revisão visual, análise de pixel art, tween, smear, aprovação humana, pintura ao vivo, ações direcionais e exportação para engines.
 - **Estrutura nativa do Aseprite**: cels vinculados, grupos aninhados, pivôs/nine-patch, blend modes, merge/flatten e exportação avançada por tag, intervalo e camada.
 - **Ciclo visual incremental**: preview opcional após mutações, filmstrip, onion skin, comparação exata entre frames, checkpoints e histórico de alterações por revisão.
 - **Qualidade de pixel art**: lint heurístico, CIEDE2000, análise de paleta, rampas com hue shift e dithering Bayer determinístico.
@@ -311,7 +311,7 @@ No Windows via PowerShell:
 
 ## Resumo das Ferramentas MCP
 
-O conjunto completo contém **132 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
+O conjunto completo contém **138 ferramentas únicas**. Para reduzir o contexto enviado ao modelo, exponha somente os toolsets necessários.
 
 ### Inspeção Visual e Leitura
 - `aseprite_status`: Estado da conexão, arquivo ativo, tamanho do canvas, camada e frame selecionados e revisão atual.
@@ -370,6 +370,16 @@ O conjunto completo contém **132 ferramentas únicas**. Para reduzir o contexto
 - `create_pixel_art_tween` gera intermediários entre duas poses-chave movendo clusters 4-conectados da mesma cor; não mistura alfa, redimensiona ou suaviza pixels. Os frames produzidos exigem inspeção com `get_canvas`, preview temporal e QA.
 - `create_smear_frame` insere um único frame de smear nítido entre keyframes normais, calculando a direção a partir dos limites ocupados e preservando as poses original e final.
 - `request_human_approval` abre um diálogo nativo no Aseprite com preview, `Aprovar`, `Pedir alterações` e `Rejeitar`. O recibo aprovado pode ser exigido antes de um export final.
+
+### Ações direcionais
+
+- `plan_directional_animation` compõe o plano para caminhada, corrida, idle, ataque corpo a corpo/à distância, hit, morte, dash, cast e interação em 4 ou 8 direções. Ele produz nomes de tags, timing, poses, eventos de engine e critérios de QA com base em frames, FPS, passada e estilo; hit aceita opcionalmente força máxima de recoil e tipo de dano.
+- `create_directional_animation_timeline` duplica uma pose-base para criar os slots editáveis de cada direção e suas tags. Os slots não são declarados como arte final: o agente deve desenhar as poses indicadas antes da revisão.
+- `generate_directional_animation_from_key_poses` cria automaticamente todos os frames finais para cada direção a partir de duas ou mais poses-chave já desenhadas para aquela direção. Ele preserva pixels nítidos com interpolação de clusters 4-conectados da mesma cor, registra quais intermediários foram produzidos e pede inspeção visual antes do export.
+- `analyze_directional_animation` verifica tags, timing, frames repetidos, bounds, jitter, paleta, loop, pontos exatos de contato para detectar foot sliding, contatos contra uma linha de chão, amplitude vertical e trilhas explícitas das duas mãos para confirmar balanço alternado. Na corrida, `walkReference` verifica que FPS e passada superam os da caminhada, e `walkContactFrameCount` comprova contato com o chão mais curto.
+- `assess_directional_mirroring` exige uma decisão explícita para espada em uma mão, texto, cicatrizes, iluminação ou equipamento assimétrico. `mirror_directional_animation` só espelha depois dessa aprovação e cria um novo tag sem sobrescrever o original.
+- Os eventos retornados pelo plano (`impact`/`shot`, `final_pose`, `dash_*`, `cast_*` e `interaction_contact`) incluem os frames por direção e podem ser encaminhados diretamente ao parâmetro `events` de `export_engine_assets`.
+- Interações exigem `targetHeightPx`, `targetOffsetX` e `targetOffsetY`, evitando templates cegos para objetos em alturas ou posições diferentes.
 
 ### Modo pintura ao vivo
 

@@ -35,12 +35,18 @@ describe("MCP tool exposure policy", () => {
     expect(names).toContain("load_reference_image");
     expect(names).toContain("inspect_animation");
     expect(names).toContain("render_animation_preview");
+    expect(names).toContain("plan_directional_animation");
+    expect(names).toContain("analyze_directional_animation");
+    expect(names).toContain("assess_directional_mirroring");
     expect(names).not.toContain("set_pixel");
     expect(names).not.toContain("create_layer");
     expect(names).not.toContain("save_sprite");
     expect(names).not.toContain("export_animation");
     expect(names).not.toContain("apply_ordered_dither");
     expect(names).not.toContain("start_live_painting");
+    expect(names).not.toContain("create_directional_animation_timeline");
+    expect(names).not.toContain("generate_directional_animation_from_key_poses");
+    expect(names).not.toContain("mirror_directional_animation");
     expect(names).toContain("get_live_painting_status");
   });
 });

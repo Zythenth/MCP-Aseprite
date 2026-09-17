@@ -26,6 +26,7 @@ import { registerApprovalTools } from "./tools/approval.js";
 import { registerEngineExportTools } from "./tools/engineExport.js";
 import { registerBatchExportTools } from "./tools/batchExport.js";
 import { registerLivePaintingTools } from "./tools/livePainting.js";
+import { registerDirectionalActionTools } from "./tools/directionalActions.js";
 import { ReviewState } from "./reviewState.js";
 import { AnimationWorkflowState } from "./animationWorkflowState.js";
 import { ApprovalState } from "./approvalState.js";
@@ -90,6 +91,7 @@ export function createMcpServer(
     registerWorkflowTools(toolRegistrar, activeDispatcher, activeStateTracker, workflowState);
     registerPixelMotionTools(toolRegistrar, activeDispatcher, activeStateTracker);
     registerApprovalTools(toolRegistrar, activeDispatcher, activeStateTracker, approvalState);
+    registerDirectionalActionTools(toolRegistrar, activeDispatcher, activeStateTracker);
   }
   if (enabledToolsets.has("pixel-art")) registerPixelArtTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);
   if (enabledToolsets.has("review")) registerReviewTools(toolRegistrar, activeDispatcher, activeStateTracker, reviewState);

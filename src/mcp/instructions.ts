@@ -28,6 +28,8 @@ export const PIXEL_ART_WORKFLOW_INSTRUCTIONS = `You are operating Aseprite throu
 - Use onion-skin/reference frames conceptually, compare adjacent frames, preview at actual playback speed, and inspect the loop boundary. Adjust frame durations deliberately; more frames are not automatically smoother or better.
 - Tag distinct animation ranges and avoid changing shared layers or frames in ways that unintentionally affect another animation.
 - When working with animation workflows, independent QA must be delegated by the client when agents are present (requiring an independent reviewer with reviewerId != authorId and independenceConfirmed: true).
+- For a directional action, start with plan_directional_animation. Use generate_directional_animation_from_key_poses when two or more deliberate artist-drawn key poses per direction exist: it generates crisp in-betweens but does not replace pose review. Otherwise use create_directional_animation_timeline to make editable slots; provide exact foot-contact coordinates, then use analyze_directional_animation and render_animation_preview before delivery.
+- For East/West reuse, call assess_directional_mirroring before mirror_directional_animation. Never mirror a character with a handed weapon, readable text, asymmetric scars, lighting, or equipment unless the user explicitly accepts that visual reversal; feed the returned per-direction events to export_engine_assets when the engine needs them.
 
 5. TILE AND TILESET PRACTICE
 - Match the required tile grid, perspective, texel density, palette, light direction, and collision/readability needs. Test tiles repeated on both axes, including all four corners, and repair every seam.

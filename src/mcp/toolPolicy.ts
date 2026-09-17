@@ -23,6 +23,7 @@ export const MUTATING_TOOLS = new Set([
   "create_tileset", "delete_tileset", "set_tile_pixels", "create_tilemap_layer", "set_tiles",
   "apply_ordered_dither",
   "batch_animation_edits",
+  "create_directional_animation_timeline", "generate_directional_animation_from_key_poses", "mirror_directional_animation",
   "reset_animation_workflow",
   "start_live_painting", "begin_live_painting_stage", "complete_live_painting_stage",
   "pause_live_painting", "continue_live_painting", "set_live_painting_speed",
