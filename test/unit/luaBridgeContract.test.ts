@@ -101,7 +101,7 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
 
     it("bounds native and fallback reconnects without closing a socket inside its callback", () => {
       const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
-      const fallback = /local function scheduleReconnectFallback\(dlg, generation\)([\s\S]*?)end\n\ninitWebSocket/.exec(luaContent);
+      const fallback = /local function scheduleReconnectFallback\(dlg, generation\)([\s\S]*?)end\r?\n\r?\ninitWebSocket/.exec(luaContent);
 
       expect(fallback).not.toBeNull();
       expect(fallback![1]).toContain("local staleWs = state.ws");
@@ -120,7 +120,7 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
 
     it("uses an Aseprite-side health check to detect silent TCP peer loss", () => {
       const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8");
-      const healthCheck = /local function startBridgeHealthCheck\(dlg\)([\s\S]*?)end\n\ninitWebSocket/.exec(luaContent);
+      const healthCheck = /local function startBridgeHealthCheck\(dlg\)([\s\S]*?)end\r?\n\r?\ninitWebSocket/.exec(luaContent);
 
       expect(healthCheck).not.toBeNull();
       expect(healthCheck![1]).toContain("interval = 3");
@@ -129,6 +129,13 @@ describe("Lua Bridge Contract Parity Tests (100% Parity)", () => {
       expect(healthCheck![1]).toContain("not state.reconnectTimer and not state.socketStopTimer");
       expect(luaContent).toContain("startBridgeHealthCheck(dlg)");
       expect(luaContent).toContain("stopBridgeHealthCheck()");
+    });
+
+    it("accepts the Windows CRLF checkout form for reconnect helper contracts", () => {
+      const luaContent = fs.readFileSync(path.resolve(rootDir, "lua/aseprite-bridge.lua"), "utf-8").replace(/\n/g, "\r\n");
+
+      expect(/local function scheduleReconnectFallback\(dlg, generation\)([\s\S]*?)end\r?\n\r?\ninitWebSocket/.exec(luaContent)).not.toBeNull();
+      expect(/local function startBridgeHealthCheck\(dlg\)([\s\S]*?)end\r?\n\r?\ninitWebSocket/.exec(luaContent)).not.toBeNull();
     });
 
     it("validates MAX_CHANGE_JOURNAL_ENTRIES = 128 and handlers.get_changes_since with params.sinceRevision in Lua bridge", () => {
